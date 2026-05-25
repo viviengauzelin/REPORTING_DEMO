@@ -60,8 +60,13 @@ class UploadedFileProtocol(Protocol):
 # LOGGING
 # ---------------------------------------------------------------------------
 
-def setup_logging(base_dir: str = "output") -> Path:
-    """Configure le logging Python vers fichier horodaté + console.
+def setup_logging(base_dir: str = "output", run_ts: Optional[str] = None) -> Path:
+    """Configure le logging Python vers fichier horodaté (date + heure) + console.
+
+    Le nom du fichier log inclut l'heure et la minute du run (``run_ts``) afin de
+    distinguer plusieurs exécutions déclenchées le même jour (relances manuelles,
+    planificateur de tâches multi-horaires). Si ``run_ts`` n'est pas fourni, il est
+    calculé automatiquement à partir de ``datetime.now()``.
 
     Crée le répertoire ``base_dir`` s'il n'existe pas.
     ``force=True`` réinitialise tout handler existant (évite les doublons
@@ -69,13 +74,21 @@ def setup_logging(base_dir: str = "output") -> Path:
 
     Args:
         base_dir: Chemin du répertoire de sortie des logs.
+        run_ts: Horodatage court du run au format ``HHhMM`` (ex: ``"14h30"``).
+            Doit être calculé **une seule fois** au démarrage de ``main()`` et
+            partagé avec les fonctions d'export pour garantir la cohérence des
+            noms de fichiers (log, Excel, PDF portent la même heure).
+            Si ``None``, calculé automatiquement ici.
 
     Returns:
-        Path du fichier log créé (ex: ``output/log_2025-01-15.txt``).
+        Path du fichier log créé (ex: ``output/log_2025-01-15_14h30.txt``).
     """
     Path(base_dir).mkdir(parents=True, exist_ok=True)
-    today = datetime.today().strftime("%Y-%m-%d")
-    log_path = Path(base_dir) / f"log_{today}.txt"
+    now = datetime.today()
+    today = now.strftime("%Y-%m-%d")
+    # Calcul de run_ts si non fourni (compatibilité rétrograde pour les tests)
+    effective_ts = run_ts if run_ts is not None else now.strftime("%Hh%M")
+    log_path = Path(base_dir) / f"log_{today}_{effective_ts}.txt"
 
     logging.basicConfig(
         level=SETTINGS.log_level,
@@ -87,6 +100,99 @@ def setup_logging(base_dir: str = "output") -> Path:
         force=True,
     )
     return log_path
+
+
+# ---------------------------------------------------------------------------
+# GESTION DES COUPURES - Nommage atomique des fichiers de sortie
+# ---------------------------------------------------------------------------
+
+#: Préfixe apposé sur les fichiers en cours d'écriture.
+#: Sa présence sur le disque signale qu'une coupure est survenue pendant l'écriture
+#: et que le fichier est potentiellement incomplet / non fiable.
+_CORRUPT_PREFIX: str = "CORROMPU_"
+
+
+def build_output_paths(
+    base_stem: str,
+    out_dir: Path,
+    run_ts: str,
+    extension: str,
+) -> tuple[Path, Path]:
+    """Calcule les chemins temporaire et définitif d'un fichier de sortie.
+
+    **Stratégie anti-coupure :**
+    Les fichiers sont d'abord écrits sous un nom temporaire portant le préfixe
+    ``CORROMPU_``. Ce préfixe est un signal visuel immédiat pour l'opérateur :
+    si un run est interrompu (coupure réseau, plantage, extinction du poste),
+    les fichiers incomplets restent sur le disque avec ce préfixe et **ne peuvent
+    pas être confondus avec des fichiers finalisés et fiables**.
+
+    Le renommage vers le nom définitif (``commit_output_file``) n'intervient
+    qu'une fois **toutes** les écritures terminées avec succès.
+
+    Le ``run_ts`` (ex: ``"14h30"``) est intégré dans le nom final pour distinguer
+    plusieurs runs déclenchés le même jour et permettre une traçabilité complète
+    dans les répertoires d'archives.
+
+    Args:
+        base_stem: Racine du nom de fichier sans extension ni timestamp
+            (ex: ``"reporting_2025-01_to_2025-06"``).
+        out_dir: Répertoire de destination (doit exister ou sera créé par l'appelant).
+        run_ts: Horodatage court ``HHhMM`` (ex: ``"14h30"``), calculé **une seule fois**
+            au démarrage du run pour cohérence entre tous les fichiers produits.
+        extension: Extension avec le point (ex: ``".xlsx"``, ``".pdf"``).
+
+    Returns:
+        Tuple ``(temp_path, final_path)`` :
+        - ``temp_path``  : chemin d'écriture pendant le run  (préfixe ``CORROMPU_``).
+        - ``final_path`` : chemin définitif après run réussi (sans préfixe).
+
+    Example:
+        >>> temp, final = build_output_paths(
+        ...     "reporting_2025-01_to_2025-06", Path("output/2025"), "14h30", ".xlsx"
+        ... )
+        >>> temp.name
+        'CORROMPU_reporting_2025-01_to_2025-06_14h30.xlsx'
+        >>> final.name
+        'reporting_2025-01_to_2025-06_14h30.xlsx'
+    """
+    final_name = f"{base_stem}_{run_ts}{extension}"
+    temp_name  = f"{_CORRUPT_PREFIX}{final_name}"
+    return out_dir / temp_name, out_dir / final_name
+
+
+def commit_output_file(temp_path: Path, final_path: Path) -> None:
+    """Renomme un fichier temporaire en son nom définitif (commit atomique).
+
+    ``Path.rename()`` est une opération **atomique** sur le même système de fichiers
+    (un seul appel syscall ``rename(2)`` sous Linux/Windows) : le fichier bascule
+    instantanément du nom temporaire au nom définitif, sans état intermédiaire visible.
+
+    Si ``temp_path`` n'existe pas (écriture préalable avortée), une ``FileNotFoundError``
+    est levée et loggée → l'opérateur est alerté qu'un fichier attendu est manquant.
+
+    Args:
+        temp_path: Chemin du fichier temporaire (portant le préfixe ``CORROMPU_``).
+        final_path: Chemin de destination définitif.
+
+    Raises:
+        FileNotFoundError: Si ``temp_path`` n'existe pas sur le disque.
+        OSError: Si le renommage échoue (permissions, disque différent, etc.).
+    """
+    if not temp_path.exists():
+        logging.error(
+            f"[Commit] Fichier temporaire introuvable : {temp_path} — "
+            "le run précédent a peut-être été interrompu avant l'écriture."
+        )
+        raise FileNotFoundError(
+            f"Impossible de finaliser le fichier : {temp_path} introuvable."
+        )
+
+    temp_path.rename(final_path)
+    logging.info(
+        f"[Commit] Fichier finalisé ✅ : "
+        f"{temp_path.name}  →  {final_path.name}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1064,25 +1170,38 @@ def build_pdf_bytes(
 def export_pdf(
     report_months: pd.DataFrame,
     report_salespeople: pd.DataFrame,
-    out_dir: Path,
+    filepath: Path,
 ) -> Path:
-    """Exporte le rapport PDF sur le disque."""
+    """Exporte le rapport PDF sur le disque vers un chemin explicite.
+
+    Le chemin complet (``filepath``) est désormais fourni par l'appelant (``main.py``),
+    ce qui permet à main.py de contrôler le nommage anti-coupure (préfixe ``CORROMPU_``)
+    et l'horodatage ``HHhMM`` de façon centralisée, en cohérence avec l'export Excel.
+
+    Ancienne signature : ``export_pdf(report_months, report_salespeople, out_dir)``
+    Nouvelle signature : ``export_pdf(report_months, report_salespeople, filepath)``
+
+    Le répertoire parent est créé automatiquement s'il n'existe pas.
+
+    Args:
+        report_months: DataFrame de l'agrégation mensuelle (colonnes : mois, montant).
+        report_salespeople: DataFrame de l'agrégation par commercial.
+        filepath: Chemin complet du fichier PDF de destination.
+            En mode batch, il s'agit du chemin **temporaire** (``CORROMPU_*.pdf``) ;
+            le renommage vers le nom définitif est effectué par ``commit_output_file``.
+
+    Returns:
+        Path du fichier PDF créé.
+
+    Raises:
+        Exception: Propagée si la génération ReportLab échoue.
+    """
     from reportlab.lib.pagesizes import A4
     from reportlab.platypus import SimpleDocTemplate
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    min_month = report_months["mois"].min()
-    max_month = report_months["mois"].max()
-    filename = (
-        f"reporting_{min_month}.pdf"
-        if min_month == max_month
-        else f"reporting_{min_month}_to_{max_month}.pdf"
-    )
-
-    pdf_path = out_dir / filename
-    doc = SimpleDocTemplate(str(pdf_path), pagesize=A4)
+    Path(filepath).parent.mkdir(parents=True, exist_ok=True)
+    doc = SimpleDocTemplate(str(filepath), pagesize=A4)
     doc.build(_build_pdf_elements(report_months, report_salespeople))
 
-    logging.info(f"PDF généré : {pdf_path}")
-    return pdf_path
+    logging.info(f"PDF généré : {filepath}")
+    return Path(filepath)
