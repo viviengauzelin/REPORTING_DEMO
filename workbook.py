@@ -882,14 +882,25 @@ def _build_reconciliation_sheet(
     ws.row_dimensions[14].height = 8
 
     # --- Tableau du comptage des lignes ---
+    # Structure en deux blocs distincts pour éviter toute ambiguïté :
+    #   Bloc A : lignes RETIRÉES du DataFrame (suppression définitive)
+    #   Bloc B : lignes CONSERVÉES mais avec un montant illisible (→ NaN)
+    # Les deux comportements sont fondamentalement différents et ne doivent
+    # pas apparaître sous le même titre "supprimées".
     _section_header(ws, 15, "DÉTAIL DES LIGNES", max_col=2)
 
     lines_rows = [
-        ("Lignes sources (avant nettoyage)",           report.source_row_count,    False),
-        ("Lignes après nettoyage",                     report.processed_row_count, False),
-        ("Lignes supprimées (total)",                  report.dropped_row_count,   False),
-        ("  → dont dates invalides (parse impossible)", report.invalid_date_count,  True),
-        ("  → dont montants non convertibles (→ NaN)", report.invalid_amount_count, True),
+        # --- Comptage global ---
+        ("Lignes sources (avant nettoyage)",                    report.source_row_count,     False),
+        ("Lignes retenues après nettoyage",                     report.processed_row_count,  False),
+        # --- Bloc A : lignes retirées définitivement ---
+        ("Lignes retirées (date absente ou illisible)",         report.dropped_row_count,    False),
+        ("  → une date invalide rend la transaction non datable,", None,                     True),
+        ("     elle est donc exclue du DataFrame",              None,                        True),
+        # --- Bloc B : lignes conservées avec montant NaN ---
+        ("Lignes conservées avec montant non lisible (→ NaN)",  report.invalid_amount_count, False),
+        ("  → la ligne reste dans le DataFrame mais son montant", None,                      True),
+        ("     vaut 0 € dans le CA (exclue du calcul financier)", None,                      True),
     ]
 
     for i, (label, value, is_sub) in enumerate(lines_rows):
@@ -899,19 +910,24 @@ def _build_reconciliation_sheet(
            color=_GREY_MID if is_sub else _GREY_DARK,
            italic=is_sub, bg=row_bg)
         ws.cell(r, 1).border = _THIN_BORDER
-        _w(ws, r, 2, value, bold=True, size=10, color=_NAVY, align="right", bg=row_bg)
+        if value is not None:
+            _w(ws, r, 2, value, bold=True, size=10, color=_NAVY, align="right", bg=row_bg)
+        else:
+            ws.cell(r, 2).fill = _fill(row_bg)
         ws.cell(r, 2).border = _THIN_BORDER
         ws.row_dimensions[r].height = 16
 
-    ws.row_dimensions[21].height = 8
+    # La section est plus longue (8 lignes au lieu de 5) → la note d'audit
+    # descend de 3 lignes : ligne 22 → ligne 25.
+    ws.row_dimensions[24].height = 8
 
     # --- Note d'audit ---
-    ws.merge_cells("A22:B22")
-    _w(ws, 22, 1,
+    ws.merge_cells("A25:B25")
+    _w(ws, 25, 1,
        "ℹ️  Ce rapport est également disponible dans le fichier log.txt généré lors de "
        "l'exécution. Les deux documents sont complémentaires pour l'audit.",
        size=8, color=_GREY_MID, italic=True, align="left", wrap=True)
-    ws.row_dimensions[22].height = 28
+    ws.row_dimensions[25].height = 28
 
 
 # ===========================================================================
