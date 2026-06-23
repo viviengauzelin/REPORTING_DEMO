@@ -1,376 +1,320 @@
-# 📊 Reporting Automatisé PME
+# 📊 Reporting CHR — Projet 1 (ingestion & consolidation)
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![Streamlit](https://img.shields.io/badge/Interface-Streamlit-red)
-![Pytest](https://img.shields.io/badge/Tests-Pytest-green)
-![Statut](https://img.shields.io/badge/Statut-Demo%20Professionnelle-success)
+![DuckDB](https://img.shields.io/badge/SQL-DuckDB-yellow)
+![Pytest](https://img.shields.io/badge/Tests-61%20pytest-green)
+![mypy](https://img.shields.io/badge/Types-mypy%20%E2%9C%93-blue)
+![Statut](https://img.shields.io/badge/Statut-Démo%20professionnelle-success)
 
-Outil automatisé de consolidation et reporting Excel pour PME.
+Pipeline d'ingestion et de consolidation pour un **distributeur B2B du secteur CHR**
+(cafés, hôtels, restaurants). Il transforme cinq exports hétérogènes et « sales » en
+un **modèle en étoile** propre, **prouve mathématiquement** l'intégrité des données
+traitées, puis produit un classeur Excel d'aide à la décision pour une direction
+financière (DAF).
 
-Objectif : transformer des exports Excel bruts en reporting exploitable, propre et traçable, en quelques secondes.
+![Interface d'analyse DAF — onglet Synthèse](assets/streamlit_V2_automatisation_demo_1.png)
 
----
-
-# 🎯 Problématique PME
-
-De nombreuses PME :
-
-- Consolident manuellement plusieurs exports Excel
-- Refont les mêmes manipulations chaque mois
-- Perdent du temps sur le nettoyage des données
-- Manquent de traçabilité en cas d'erreur
-- N'ont pas d'outil simple pour produire un reporting clair
-
-Cette solution automatise l'ensemble du processus.
+*L'interface d'analyse : les indicateurs de la direction financière, recalculés en
+temps réel selon les filtres (période, région, segment, commercial).*
 
 ---
 
-# ✅ Fonctionnalités
+## 🎯 Problématique
 
-✔ Consolidation automatique de multiples fichiers Excel  
-✔ Nettoyage et normalisation des données  
-✔ Détection d'erreurs (dates invalides, montants incorrects)  
-✔ **Réconciliation des données** : checkpoint d'intégrité prouvant mathématiquement qu'aucune valeur n'a été perdue  
-✔ Reporting mensuel  
-✔ Reporting par commercial  
-✔ Export Excel multi-feuilles  
-✔ Génération PDF  
-✔ Log d'exécution détaillé (audit & traçabilité)  
-✔ Empreinte SHA-256 des fichiers source  
-✔ Suite de tests unitaires (47 tests, couverture Pytest)  
-✔ Configuration centralisée via `.env`  
+Une direction financière qui consolide ses ventes à la main fait face à :
 
-⚠️ Remarque : Cette démo est conçue pour fonctionner avec des fichiers Excel respectant le format généré par le script de démonstration. Les fichiers doivent avoir les colonnes attendues (date, montant, commercial, etc.) et un format compatible `.xlsx`.
+- des exports issus de **plusieurs systèmes** (ERP, CRM, catalogue, budget) aux
+  formats et conventions différents (nombres à la française, encodages Windows,
+  cellules fusionnées, variantes orthographiques de catégories…) ;
+- un **nettoyage manuel** répété chaque mois, lent et source d'erreurs ;
+- une **absence de preuve** : impossible de garantir qu'aucune vente n'a été perdue
+  ou comptée deux fois pendant la consolidation.
+
+Cet outil automatise toute la chaîne et, surtout, **rend le résultat auditable**.
 
 ---
 
-# 📦 Prérequis d'installation
+## ✅ Valeur ajoutée
 
-- Ordinateur Windows (code adaptable à MacOS et Linux avec quelques changements)
-- Python 3.10+ installé
-- Option "Add Python to PATH" cochée
-- Droits d'installation initiaux (ou intervention IT)
-- Connexion Internet uniquement lors de la première installation
-
----
-
-# 🧪 Données de démonstration
-
-Pour tester le projet :
-
-```bash
-python generate_demo_data.py
-```
-
-Cela crée automatiquement 12 fichiers Excel simulés (un par mois) dans :
-
-```
-data/
-```
+- **Gain de temps** : la consolidation manuelle mensuelle (plusieurs heures) devient
+  une exécution de quelques secondes.
+- **Fiabilité** : nettoyage déterministe et centralisé ; les anomalies réelles
+  (dates illisibles, montants non convertibles, catégories mal orthographiées) sont
+  traitées de façon explicite, jamais masquées.
+- **Auditabilité** : chaque run laisse une trace complète (empreinte SHA-256 des
+  sources, log horodaté, rapport de réconciliation chiffré).
+- **Confiance dans le chiffre** : le chiffre d'affaires affiché dans le tableau de
+  bord est **identique** à celui validé par le contrôle d'intégrité — un seul chiffre,
+  prouvé.
 
 ---
 
-# 🚀 Modes de fonctionnement
-
-## 1️⃣ Mode Batch (automatisation locale)
-
-Lecture automatique des fichiers déposés dans :
+## 🧩 Ce que fait l'outil
 
 ```
-data/
+5 sources hétérogènes ──▶ nettoyage (pandas) ──▶ consolidation (DuckDB, SQL)
+        │                                              │
+        │                                              ▼
+        │                                      modèle en étoile
+        │                                   (4 dimensions + 3 faits)
+        ▼                                              │
+  manifeste-oracle ─────▶ réconciliation ◀─────────────┤
+                          (12 contrôles)                │
+                                                        ▼
+                                          classeur Excel enrichi (DAF)
 ```
 
-Génération des résultats dans :
+Les 5 sources et leur principal piège métier :
 
-```
-output/<ANNEE>/
-```
+| Source | Format | Piège simulé |
+|---|---|---|
+| Ventes (ERP) | 24 fichiers `.xlsx` | nombres FR, espaces d'en-tête, dates/montants invalides, doublons |
+| CRM clients | `.csv` (cp1252) | encodage Windows, dates anormales, casse des segments |
+| Catalogue produits | `.xlsx` | **variantes orthographiques de catégories** (l'anomalie la plus dangereuse) |
+| Budget | `.xlsx` (large) | cellules fusionnées, sous-totaux intercalés |
+| Commerciaux | `.csv` | référentiel propre (contraste volontaire) |
 
-Fichiers produits :
+**Principe clé : la marge et le chiffre d'affaires ne sont jamais stockés.** La table
+de faits ne porte que les composantes (quantité, prix, remise, coût). Le CA et la
+marge se **recalculent en SQL** — c'est ce qui garantit qu'ils ne peuvent pas
+« dériver » d'une source figée et obsolète.
 
-- `reporting_YYYY-MM_to_YYYY-MM.xlsx`
-- `reporting_YYYY-MM_to_YYYY-MM.pdf`
-- `log_YYYY-MM-DD.txt`
+---
 
-Le mode Batch intègre un **checkpoint d'intégrité des données** : si un écart anormal est détecté entre la somme source et la somme traitée, le script se termine avec le code de sortie `2` (détectable par un planificateur ou un système de supervision).
+## 🔐 Le checkpoint de réconciliation
 
-### Lancer :
+Le cœur de l'auditabilité. Avant toute diffusion, le pipeline confronte son résultat
+à un **manifeste-oracle** (`_manifest_anomalies.json`) qui décrit la vérité attendue.
+La fonction `reconcile_against_manifest` agrège **12 points de contrôle** :
+
+- **5 métriques officielles** : lignes après déduplication, dates invalides, montants
+  invalides, CA réconcilié (recalculé en SQL), nombre de catégories canoniques ;
+- **2 contrôles structurels** : segments CRM tous canoniques, grille budgétaire
+  complète ;
+- **5 contrôles d'intégrité référentielle** : aucune clé étrangère orpheline entre
+  les faits et les dimensions — la preuve que **100 % des transactions** se rattachent
+  au modèle.
+
+En mode Batch, si **un seul** contrôle échoue, le script **refuse de finaliser** le
+livrable et sort avec le **code 2** (détectable par un planificateur). En mode
+interface, l'écart est affiché en rouge dans le tableau des contrôles.
+
+![Rapport de réconciliation — 12 contrôles](assets/streamlit_V2_automatisation_demo_2.png)
+
+*Le cœur de l'auditabilité : chaque métrique confrontée à l'oracle, OK ou ALERTE.*
+
+---
+
+## 🧾 Traçabilité & Audit
+
+Chaque exécution enregistre :
+
+- l'**empreinte SHA-256** de chaque fichier source (intégrité des données auditées) ;
+- un **journal d'exécution** listant chaque étape, les statistiques de nettoyage et le
+  rapport de réconciliation complet : écrit dans un fichier horodaté
+  (`output/log_AAAA-MM-JJ_HHhMM.txt`) en mode Batch, et **téléchargeable directement
+  depuis l'interface** Streamlit ;
+- une **stratégie anti-coupure** : le classeur est d'abord écrit sous un nom préfixé
+  `CORROMPU_`, renommé vers son nom définitif **seulement** après succès complet. Si
+  le run est interrompu (coupure, plantage, `Ctrl+C`), le fichier incomplet reste
+  visiblement préfixé et ne peut pas être diffusé par erreur.
+
+Objectif : pouvoir justifier un résultat à tout moment, y compris face à un
+expert-comptable ou un auditeur.
+
+---
+
+## 📦 Le livrable Excel
+
+Un classeur unique de **9 feuilles**, des plus stratégiques (synthèse pour la
+direction) aux plus détaillées (annexe auditable).
+
+**Analyse pour la direction financière (DAF)**
+
+1. **🧭 Synthèse DAF** — narratif factuel auto-généré + indicateurs clés (CA, marge,
+   écart au budget, croissance annuelle).
+2. **💹 Marge & rentabilité** — érosion mensuelle du taux de marge, rentabilité par
+   catégorie, impact des remises (fuite de marge).
+3. **🎯 Réalisé vs Budget** — écarts au plan par mois et par région
+   (écart = réalisé − budget ; un écart négatif est défavorable).
+4. **👥 Clients & segments** — concentration du CA (courbe de Pareto / ABC), top
+   clients, poids et rentabilité des segments.
+
+**Reporting & pilotage**
+
+5. **📊 Dashboard** — KPIs visuels et graphiques (matplotlib, insérés en PNG).
+6. **📅 Par mois** — agrégation mensuelle formatée.
+7. **👤 Par commercial** — contribution au CA et rentabilité par commercial.
+
+**Audit & traçabilité**
+
+8. **🔍 Annexe (données brutes)** — transactions livrées nettoyées, avec autofiltre.
+9. **🔐 Réconciliation** — miroir Excel du rapport d'intégrité, **couleur
+   conditionnelle OK / ALERTE**.
+
+![Feuille Dashboard du classeur Excel](assets/streamlit_V2_automatisation_demo_3.png)
+
+*Le livrable final : un classeur autoporté, lisible sans aucun outil technique.*
+
+---
+
+## 🚀 Modes de fonctionnement
+
+### 1️⃣ Mode Batch (automatisation)
+
+Lit les sources de `data_raw/`, produit `output/<ANNEE>/reporting_*_HHhMM.xlsx` et le
+log horodaté.
 
 ```bash
 python main.py
 ```
 
-Idéal pour :
+Codes de sortie : `0` = succès (ou aucune source à traiter) · `2` = manifeste absent
+ou écart d'intégrité (ne pas diffuser). Idéal pour le Planificateur de tâches Windows.
 
-- Exécution planifiée via le Planificateur de tâches Windows
-- Traitement mensuel automatisé
-- Intégration dans un flux interne
-
----
-
-## 2️⃣ Interface Web (Streamlit)
-
-Interface utilisateur interactive :
-
-- Upload des fichiers Excel
-- Mapping des colonnes
-- Contrôle qualité en temps réel
-- Réconciliation des données avec verdict d'intégrité
-- Génération instantanée
-- Téléchargement Excel / PDF / Log
-
-Lancer :
+### 2️⃣ Interface Web (Streamlit)
 
 ```bash
 streamlit run app.py
 ```
 
-Idéal pour :
+L'application détecte les sources dans `data_raw/` (un bouton génère un jeu de
+démonstration si besoin) et lance le pipeline **sur 100 % des sources**. Elle présente
+ensuite une vue d'analyse DAF organisée en **six onglets** — Synthèse, Marge &
+rentabilité, Réalisé vs Budget, Clients & segments, Par commercial, Réconciliation.
 
-- Utilisateur non technique
-- Traitement ponctuel
-- Analyse exploratoire
+Des **filtres d'analyse** (période, région, segment, commercial) re-dérivent les vues
+affichées à la volée. Point important : ces filtres **n'agissent que sur l'affichage** ;
+l'ingestion, la réconciliation et le classeur Excel portent toujours sur 100 % des
+données — la preuve d'intégrité n'est jamais compromise par une sélection. (Le budget
+n'étant suivi que par mois et région, l'onglet budgétaire le signale si un filtre
+segment ou commercial est actif.)
 
----
+Trois sorties sont proposées : le **classeur Excel enrichi**, le **journal d'exécution**
+(`.txt`, incluant les empreintes SHA-256 des sources) et un panneau listant ces
+**empreintes** fichier par fichier.
 
-# 🖥 Aperçu de l'interface
+![Onglet Marge & rentabilité — érosion du taux de marge](assets/streamlit_V2_automatisation_demo_4.png)
 
-## 1️⃣ Upload des fichiers Excel
-
-<img src="assets/streamlit_automatisation_demo_1.png" width="900">
-
-Interface permettant l'import de plusieurs fichiers `.xlsx` simultanément, avec détection automatique des doublons.
-
----
-
-## 2️⃣ Mapping des colonnes
-
-<img src="assets/streamlit_automatisation_demo_2.png" width="900">
-
-Sélection guidée des colonnes nécessaires (Date, Montant, Commercial) avec validation des incohérences.
+*Exemple d'analyse exposée à l'écran : l'érosion mensuelle du taux de marge.*
 
 ---
 
-## 3️⃣ Résumé & Reporting
+## 🧪 Données de démonstration
 
-<img src="assets/streamlit_automatisation_demo_3.png" width="900">
----
-<img src="assets/streamlit_automatisation_demo_4.png" width="900">
+```bash
+python generate_demo_data.py
+```
 
-Affichage des indicateurs clés :
-
-- Nombre de fichiers traités
-- Lignes avant/après nettoyage
-- Qualité des données
-- **Verdict de réconciliation des données** (✅ OK ou 🚨 Alerte)
-- Chiffre d'affaires total
-- Reporting mensuel et par commercial
+Génère, dans `data_raw/`, un jeu déterministe (seed 42) : 24 exports de ventes, le CRM,
+le catalogue, 2 budgets, le référentiel commerciaux, **et le manifeste-oracle**. Les
+données contiennent des signaux métier réalistes (saisonnalité CHR, érosion de marge
+par effet mix, cohorte de clients en attrition, trajectoires de commerciaux
+contrastées).
 
 ---
 
-## 4️⃣ Téléchargement des résultats
-
-<img src="assets/streamlit_automatisation_demo_5.png" width="900">
-
-Export immédiat :
-
-- Excel multi-feuilles formaté
-- Rapport PDF
-- Log d'exécution complet (audit & traçabilité)
-
----
-
-# 🏗 Architecture du projet
+## 🏗 Architecture du projet
 
 ```
 project/
 │
-├── app.py                  # Interface Streamlit (présentation)
+├── app.py                  # Interface Streamlit (présentation uniquement)
 ├── main.py                 # Point d'entrée mode Batch
-├── utils.py                # Moteur : chargement, nettoyage, exports, audit
-├── config.py               # Configuration centralisée (SETTINGS, DATA_DICTIONARY)
-├── generate_demo_data.py   # Générateur de données de test
-├── test_utils.py           # Suite de tests unitaires (pytest, 47 tests)
+├── utils.py                # Moteur : lecture, nettoyage, consolidation, réconciliation
+├── workbook.py             # Assemblage du classeur Excel enrichi (dashboard + audit)
+├── config.py               # Source de vérité : SOURCES, STAR_SCHEMA, REGIONS, normalisation
+├── generate_demo_data.py   # Générateur de données de test + manifeste-oracle
+├── test_utils.py           # Suite de tests pytest (61 tests)
 │
 ├── requirements.txt        # Dépendances Python
-├── .env.template           # Modèle de configuration (à copier en .env)
 ├── README.md
 │
-├── INSTALLER.bat           # Installation en un clic (Windows)
-├── RUN_STREAMLIT.bat       # Lancement interface Web
-├── RUN_BATCH.bat           # Lancement mode automatisé
-├── CREER_FICHIERS_DEMO.bat # Génération des données de test
+├── INSTALLER.bat           # Installation en un clic (venv + dépendances)
+├── RUN_STREAMLIT.bat       # Lancement de l'interface Web
+├── RUN_BATCH.bat           # Lancement du mode automatisé
+├── CREER_FICHIERS_DEMO.bat # Génération des données de démonstration
 │
-├── data/                   # Fichiers source (non versionnés)
-├── output/                 # Résultats générés (non versionnés)
+├── data_raw/               # Fichiers source (non versionnés)
+├── output/                 # Livrables et logs (non versionnés)
 └── venv/                   # Environnement virtuel (non versionné)
 ```
 
+Séparation des responsabilités stricte : `utils.py` ne contient **aucune** logique de
+mise en page Excel ; `workbook.py` ne contient **aucune** logique métier ; toute la
+normalisation (catégories, segments) et le référentiel des régions vivent dans
+`config.py`.
+
 ---
 
-# ⚙ Installation
+## ⚙ Installation
 
-## Installation manuelle
+### En un clic (Windows)
 
-**1️⃣ Créer un environnement virtuel**
+1. Double-cliquer sur **`INSTALLER.bat`** (crée le `venv` et installe les dépendances).
+2. Double-cliquer sur **`CREER_FICHIERS_DEMO.bat`** (génère les données de démo).
+3. Lancer **`RUN_STREAMLIT.bat`** (interface) ou **`RUN_BATCH.bat`** (automatisé).
+
+### Manuelle
 
 ```bash
 python -m venv venv
-```
-
-Activation (Windows) :
-
-```bash
-venv\Scripts\activate
-```
-
-Si PowerShell bloque :
-
-```bash
-Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
-```
-
-**2️⃣ Installer les dépendances**
-
-```bash
+venv\Scripts\activate          # Windows
 pip install -r requirements.txt
 ```
 
-**3️⃣ Configurer l'environnement (optionnel)**
+Une configuration optionnelle peut être placée dans un fichier `.env` (chemins,
+niveau de log, tolérance de réconciliation) — chargé automatiquement s'il est présent.
+
+---
+
+## 🧪 Lancer les tests
 
 ```bash
-cp .env.template .env
-# Éditer .env selon ton environnement (chemins, niveau de log, etc.)
+pytest -v
+```
+
+Avec couverture :
+
+```bash
+pytest --cov=utils --cov-report=term-missing
+```
+
+Les 61 tests couvrent les cas nominaux **et** la robustesse (DataFrame vide, colonne
+manquante, texte dans une colonne de prix) ainsi que la **détection de perte
+d'intégrité** : un CA faussé, une clé étrangère orpheline ou un compteur erroné
+doivent faire échouer la réconciliation. Le pont vers les vues de reporting est testé
+pour prouver qu'une anomalie (prix invalide, date illisible, commercial orphelin) est
+rendue **visible** sans jamais faire disparaître silencieusement du chiffre d'affaires.
+
+### Vérification de types
+
+Le code de production est intégralement typé et validé par **mypy** (run vert, aucune erreur). La configuration vit dans `mypy.ini`.
+
+```powershell
+mypy
 ```
 
 ---
 
-## ⚙️ Installation & Lancement simplifiés (.bat)
-
-Pour une utilisation simple côté PME, l'outil peut être installé et lancé sans terminal.
-
-### 🔹 1. Installation (une seule fois)
-
-Double-cliquer sur `INSTALLER.bat`.
-
-Ce script :
-- Crée un environnement virtuel (venv)
-- Installe automatiquement les dépendances
-- Prépare l'environnement d'exécution
-
----
-
-### 🔹 2. Création des fichiers Excel de démo
-
-Double-cliquer sur `CREER_FICHIERS_DEMO.bat`.
-
-Ce script :
-- Crée le dossier `data/` avec 12 fichiers Excel de démonstration
-
----
-
-### 🔹 3a. Lancement – Mode Interface (recommandé)
-
-Double-cliquer sur `RUN_STREAMLIT.bat`.
-
-Cela :
-- Lance l'application Streamlit
-- Ouvre automatiquement le navigateur en local (localhost)
-
----
-
-### 🔹 3b. Lancement – Mode Batch (automatique)
-
-Double-cliquer sur `RUN_BATCH.bat`.
-
-Le script :
-- Traite automatiquement tous les fichiers `.xlsx` du dossier `data/`
-- Génère les reportings dans `output/`
-- Affiche une alerte si le checkpoint d'intégrité des données détecte un écart
-
-⚠️ En environnement planifié (Planificateur de tâches Windows), `RUN_BATCH.bat` peut être exécuté automatiquement. Le code de sortie `2` signale une alerte d'intégrité détectable par le planificateur.
-
----
-
-# 🧪 Lancer les tests
-
-```bash
-pytest test_utils.py -v
-```
-
-Avec rapport de couverture :
-
-```bash
-pytest test_utils.py --cov=utils --cov-report=term-missing
-```
-
-La suite couvre 47 cas : nominal, colonnes manquantes, données vides, formats invalides, et détection d'anomalie dans les valeurs des données par la réconciliation.
-
----
-
-# 🧾 Traçabilité & Audit
-
-Chaque exécution enregistre :
-
-- Horodatage précis
-- Liste des fichiers traités
-- Empreinte SHA-256 des fichiers source
-- Statistiques de qualité des données
-- Nombre de lignes supprimées et raison
-- **Résultat de la réconciliation des données** (somme source vs somme traitée, écart en € et %)
-- Résumé du chiffre d'affaires
-
-Objectif : pouvoir justifier un résultat à tout moment, y compris face à un expert-comptable ou un auditeur.
-
----
-
-# 🔐 Sécurité & Bonnes pratiques
-
-- Aucun code client n'est exécuté
-- Validation des types et conversions sécurisées
-- Gestion robuste des erreurs (fichiers corrompus, protégés, mal formés)
-- Données et fichiers `.env` non versionnés (`.gitignore`)
-- Logs exploitables en cas de contrôle
-
----
-
-# 💼 Cas d'usage
-
-- Consolidation mensuelle des ventes
-- Reporting commercial multi-fichiers
-- Préparation reporting expert-comptable
-- Contrôle et fiabilisation des exports CRM
-- Analyse interne direction
-
----
-
-# 📈 Valeur ajoutée
-
-Gain estimé :
-
-- 1 à 3 heures économisées par mois
-- Réduction du risque d'erreur humaine
-- Meilleure traçabilité et auditabilité
-- Standardisation du reporting
-
----
-
-# 🧠 Technologies
+## 🧠 Technologies
 
 - Python 3.10+
-- Pandas
-- OpenPyXL
-- ReportLab
-- Streamlit
-- python-dotenv
-- Pytest
-- Git
+- Pandas (nettoyage, agrégations)
+- DuckDB (consolidation SQL en étoile, recalcul du CA)
+- OpenPyXL + Matplotlib (classeur Excel et graphiques)
+- Streamlit (interface)
+- python-dotenv (`.env` optionnel)
+- Pytest (tests)
+- mypy (vérification de types statique)
 
 ---
 
-# 👨‍💻 Auteur
+## 👨‍💻 Auteur
 
-Vivien Gauzelin  
-Data Analyst | Automatisation & fiabilisation de données  
+Vivien Gauzelin
+Data Analyst | Automatisation & fiabilisation de données
 
-Projet démonstration dans le cadre d'une activité freelance spécialisée en automatisation de processus et reporting.
+Projet de démonstration réalisé dans le cadre d'une activité freelance spécialisée en
+automatisation de processus et reporting.

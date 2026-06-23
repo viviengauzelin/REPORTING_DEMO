@@ -1,24 +1,28 @@
 """
-dashboard.py - Classeur Excel enrichi : tableau de bord visuel et rapport de réconciliation.
+workbook.py - Classeur Excel enrichi : analyse DAF, reporting et rapport de réconciliation.
 
-Module additionnel V2.1 — aucune fonction de utils.py n'est modifiée.
+Présentation Excel pure : ce module assemble et met en forme le classeur, sans aucune
+logique métier (toute la logique vit dans utils.py).
 
-Nouvelles fonctions publiques :
+Fonctions publiques :
     compute_dashboard_kpis()              → indicateurs clés pré-calculés
-    build_excel_bytes_with_dashboard()    → export mode Streamlit
-    export_excel_with_dashboard()         → export mode Batch
+    build_excel_bytes_with_dashboard()    → export mode Streamlit (en mémoire)
+    export_excel_with_dashboard()         → export mode Batch (sur disque)
 
-Structure du classeur produit (5 feuilles dans l'ordre) :
-    1. 📊 Dashboard      → KPIs + 5 graphiques
-    2. 📅 Par mois       → agrégation mensuelle formatée
-    3. 👤 Par commercial → agrégation par commercial formatée
-    4. 🔍 Données brutes → transactions nettoyées
-    5. 🔐 Réconciliation → rapport d'intégrité (miroir du log .txt)
-    (+ _data, feuille cachée alimentant les graphiques)
+Structure du classeur produit (9 feuilles, dans l'ordre) :
+    1. 🧭 Synthèse DAF          → narratif factuel + indicateurs clés
+    2. 💹 Marge & rentabilité   → érosion mensuelle, mix catégorie, fuite par remise
+    3. 🎯 Réalisé vs Budget     → écarts au plan par mois et par région
+    4. 👥 Clients & segments    → concentration (Pareto), top clients, poids des segments
+    5. 📊 Dashboard             → KPIs + graphiques (matplotlib en PNG)
+    6. 📅 Par mois              → agrégation mensuelle formatée
+    7. 👤 Par commercial        → CA, marge et taux par commercial
+    8. 🔍 Annexe (données brutes) → transactions livrées nettoyées (autofiltre)
+    9. 🔐 Réconciliation        → miroir Excel du rapport d'intégrité (OK/ALERTE)
 
 Palette : bleu marine (#1F3864), gris, blanc — sobre, adapté direction financière PME.
-Graphiques : 5 graphiques matplotlib (PNG) — titres et axes positionnés en dehors de la zone
-    de tracé, graduations complètes avec formatage monétaire.
+Graphiques : matplotlib (PNG insérés via openpyxl) — titres et axes hors de la zone de
+    tracé, graduations complètes avec formatage monétaire.
 """
 
 from __future__ import annotations
@@ -38,6 +42,7 @@ from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.properties import PageSetupProperties
 
 from config import SETTINGS
 from utils import ReconciliationReport
@@ -168,6 +173,31 @@ def _fmt_eur(x: float, decimals: int = 0) -> str:
     return f"{s} €"
 
 
+def _fmt_signed_pct(x: Optional[float], decimals: int = 1) -> str:
+    """Formate un pourcentage signé à la française : ``16.9`` → ``+16,9 %`` ; ``None`` → ``n/a``."""
+    if x is None or pd.isna(x):
+        return "n/a"
+    return f"{x:+.{decimals}f} %".replace(".", ",")
+
+
+def _fmt_signed_pts(x: Optional[float], decimals: int = 1) -> str:
+    """Formate une variation en points signée : ``-2.12`` → ``-2,1 pts`` ; ``None`` → ``n/a``."""
+    if x is None or pd.isna(x):
+        return "n/a"
+    return f"{x:+.{decimals}f} pts".replace(".", ",")
+
+
+def _favorable_color(value: Optional[float], higher_is_better: bool = True) -> str:
+    """Renvoie la couleur sémantique d'une variation : vert si favorable, rouge sinon.
+
+    Un ``None`` (variation indéfinie, ex. YoY sur une seule année) reste neutre (navy).
+    """
+    if value is None or pd.isna(value):
+        return _NAVY
+    favorable = value >= 0 if higher_is_better else value <= 0
+    return _GREEN if favorable else _RED
+
+
 # ===========================================================================
 # DATACLASS — Indicateurs clés du tableau de bord
 # ===========================================================================
@@ -215,7 +245,7 @@ def compute_dashboard_kpis(
 ) -> DashboardKPIs:
     """Calcule les indicateurs clés à partir des données nettoyées.
 
-    Tous les calculs sont basés sur les montants **valides** (non-NaN) uniquement,
+    Tous les calculs sont basés sur les montants valides (non-NaN) uniquement,
     conformément à la règle comptable : un montant non convertible n'est pas du CA.
 
     Args:
@@ -256,7 +286,7 @@ def compute_dashboard_kpis(
     top_salesperson_revenue: Optional[float] = None
     active_salespeople = 0
 
-    if not report_salespeople.empty and len(report_salespeople) > 0:
+    if not report_salespeople.empty:
         active_salespeople = int(report_salespeople["commercial"].nunique())
         idx_top = int(report_salespeople["montant"].idxmax())
         top_salesperson         = str(report_salespeople.loc[idx_top, "commercial"])
@@ -281,7 +311,7 @@ def compute_dashboard_kpis(
 
 
 # ===========================================================================
-# 5 GRAPHIQUES — Builders individuels
+# GRAPHIQUES DU DASHBOARD — Builders individuels
 # ===========================================================================
 
 
@@ -312,6 +342,11 @@ def _eur_axis_fmt(x: float, _: Any) -> str:
 def _pct_axis_fmt(x: float, _: Any) -> str:
     """Formatte une valeur en pourcentage pour l'affichage sur un axe matplotlib."""
     return f"{x:+.1f} %" if x != 0 else "0 %"
+
+
+def _pct_axis_fmt_unsigned(x: float, _: Any) -> str:
+    """Formatte un pourcentage SANS signe — pour les taux (niveaux), pas les variations."""
+    return f"{x:.0f} %"
 
 
 def _apply_chart_style(
@@ -800,30 +835,36 @@ def _build_reconciliation_sheet(
     wb: Any,
     report: ReconciliationReport,
 ) -> None:
-    """Construit la feuille '🔐 Réconciliation' avec le rapport d'intégrité.
+    """Construit la feuille '🔐 Réconciliation' : miroir Excel du checkpoint unifié.
 
-    Cette feuille est le miroir Excel du fichier log.txt : elle rend le
-    checkpoint d'intégrité lisible directement dans le classeur, sans
-    supprimer le log (les deux coexistent pour la traçabilité complète).
+    Rend lisible, directement dans le classeur, le rapport produit par
+    ``utils.reconcile_against_manifest`` : une ligne par point de contrôle (les
+    5 métriques de l'oracle + les contrôles structurels + l'intégrité référentielle
+    des clés étrangères), avec couleur conditionnelle OK / ALERTE. Elle coexiste avec
+    le fichier ``log.txt`` (même contenu via ``report.render()``) : les deux supports
+    se complètent pour l'audit.
 
     Args:
         wb: Classeur openpyxl.
-        report: Rapport de réconciliation issu de ``utils.reconcile_data()``.
+        report: Rapport de réconciliation unifié (porte ``checks`` et ``integrity_ok``).
     """
     ws = wb.create_sheet("🔐 Réconciliation")
 
-    ws.column_dimensions["A"].width = 42
-    ws.column_dimensions["B"].width = 22
-    ws.column_dimensions["C"].width = 5   # col de décoration
+    # 5 colonnes : Contrôle | Obtenu | Attendu | Statut | Détail
+    ws.column_dimensions["A"].width = 34
+    ws.column_dimensions["B"].width = 16
+    ws.column_dimensions["C"].width = 16
+    ws.column_dimensions["D"].width = 12
+    ws.column_dimensions["E"].width = 50
 
     # --- Titre ---
-    ws.merge_cells("A1:B1")
-    _w(ws, 1, 1, "RAPPORT DE RÉCONCILIATION DES DONNÉES",
+    ws.merge_cells("A1:E1")
+    _w(ws, 1, 1, "RAPPORT DE RÉCONCILIATION — CHECKPOINT D'INTÉGRITÉ",
        bold=True, size=14, color=_WHITE, bg=_NAVY, align="center")
     ws.row_dimensions[1].height = 30
 
     # --- Sous-titre ---
-    ws.merge_cells("A2:B2")
+    ws.merge_cells("A2:E2")
     _w(ws, 2, 1,
        f"Généré le {datetime.today().strftime('%d/%m/%Y à %H:%M')}  |  "
        f"{SETTINGS.app_name} v{SETTINGS.app_version}",
@@ -832,102 +873,72 @@ def _build_reconciliation_sheet(
 
     ws.row_dimensions[3].height = 8  # respiration
 
-    # --- Résultat global ---
-    _section_header(ws, 4, "RÉSULTAT DU CONTRÔLE", max_col=2)
+    # --- Bandeau de résultat global ---
+    n_ok = sum(1 for c in report.checks if c.ok)
+    n_total = len(report.checks)
+    if report.integrity_ok:
+        status_text = f"✅  INTÉGRITÉ VALIDÉE — {n_ok}/{n_total} contrôles au vert"
+        status_bg, status_col = _GREY_LITE, _GREEN
+    else:
+        status_text = f"🚨  ALERTE INTÉGRITÉ — {n_ok}/{n_total} contrôles au vert"
+        status_bg, status_col = _ALERT_BG, _RED
 
-    status_text = "✅  INTÉGRITÉ VALIDÉE" if report.integrity_ok else "🚨  ALERTE — ÉCART DÉTECTÉ"
-    status_bg   = _GREY_LITE if report.integrity_ok else _ALERT_BG
-    status_col  = _GREEN     if report.integrity_ok else _RED
-
-    ws.merge_cells("A5:B5")
-    _w(ws, 5, 1, status_text,
+    ws.merge_cells("A4:E4")
+    _w(ws, 4, 1, status_text,
        bold=True, size=13, color=status_col, bg=status_bg, align="center")
-    ws.cell(5, 1).border = _THIN_BORDER
-    ws.row_dimensions[5].height = 28
+    ws.cell(4, 1).border = _THIN_BORDER
+    ws.row_dimensions[4].height = 28
 
-    ws.merge_cells("A6:B6")
-    _w(ws, 6, 1, report.message,
-       size=9, color=_GREY_DARK, bg=status_bg, align="left", wrap=True)
-    ws.row_dimensions[6].height = 32
+    ws.row_dimensions[5].height = 8
 
-    ws.row_dimensions[7].height = 8
+    # --- En-tête du tableau des contrôles ---
+    header_row = 6
+    headers = ["Contrôle", "Obtenu", "Attendu", "Statut", "Détail"]
+    for col, label in enumerate(headers, start=1):
+        align = "left" if col in (1, 5) else "center"
+        _w(ws, header_row, col, label,
+           bold=True, size=10, color=_WHITE, bg=_NAVY, align=align)
+        ws.cell(header_row, col).border = _THIN_BORDER
+    ws.row_dimensions[header_row].height = 18
 
-    # --- Tableau des montants ---
-    _section_header(ws, 8, "DÉTAIL DES MONTANTS", max_col=2)
-
+    # --- Une ligne par point de contrôle, couleur conditionnelle OK / ALERTE ---
+    # Un contrôle en alerte est surligné (fond _ALERT_BG) pour ressortir d'un coup
+    # d'œil ; les contrôles OK alternent blanc / gris clair pour rester lisibles.
+    # Le format monétaire ne s'applique qu'aux lignes dont le libellé porte "€"
+    # (le CA réconcilié) ; les autres métriques sont des compteurs entiers.
     money_fmt = '#,##0.00 "€"'
-    amounts_rows = [
-        ("Somme source attendue (lignes à date valide)", report.expected_source_sum, money_fmt),
-        ("Somme traitée après nettoyage",                report.processed_sum,       money_fmt),
-        ("Écart absolu",                                 report.absolute_gap,        money_fmt),
-        ("Écart relatif (%)",                            report.gap_pct * 100,       '0.0000"%"'),
-        ("Tolérance appliquée (%)",
-         SETTINGS.reconciliation_tolerance_pct * 100,   '0.00"%"'),
-    ]
+    int_fmt = "#,##0"
+    for i, check in enumerate(report.checks):
+        r = header_row + 1 + i
+        row_bg = _ALERT_BG if not check.ok else (_GREY_LITE if i % 2 == 0 else _WHITE)
+        num_fmt = money_fmt if "€" in check.label else int_fmt
 
-    for i, (label, value, fmt) in enumerate(amounts_rows):
-        r      = 9 + i
-        row_bg = _GREY_LITE if i % 2 == 0 else _WHITE
-        _w(ws, r, 1, label, size=10, color=_GREY_DARK, bg=row_bg)
-        ws.cell(r, 1).border = _THIN_BORDER
-        cell = ws.cell(r, 2)
-        cell.value         = value
-        cell.font          = _font(bold=True, size=10, color=_NAVY)
-        cell.fill          = _fill(row_bg)
-        cell.alignment     = Alignment(horizontal="right", vertical="center")
-        cell.border        = _THIN_BORDER
-        cell.number_format = fmt
-        ws.row_dimensions[r].height = 18
-
-    ws.row_dimensions[14].height = 8
-
-    # --- Tableau du comptage des lignes ---
-    # Structure en deux blocs distincts pour éviter toute ambiguïté :
-    #   Bloc A : lignes RETIRÉES du DataFrame (suppression définitive)
-    #   Bloc B : lignes CONSERVÉES mais avec un montant illisible (→ NaN)
-    # Les deux comportements sont fondamentalement différents et ne doivent
-    # pas apparaître sous le même titre "supprimées".
-    _section_header(ws, 15, "DÉTAIL DES LIGNES", max_col=2)
-
-    lines_rows = [
-        # --- Comptage global ---
-        ("Lignes sources (avant nettoyage)",                    report.source_row_count,     False),
-        ("Lignes retenues après nettoyage",                     report.processed_row_count,  False),
-        # --- Bloc A : lignes retirées définitivement ---
-        ("Lignes retirées (date absente ou illisible)",         report.dropped_row_count,    False),
-        ("  → une date invalide rend la transaction non datable,", None,                     True),
-        ("     elle est donc exclue du DataFrame",              None,                        True),
-        # --- Bloc B : lignes conservées avec montant NaN ---
-        ("Lignes conservées avec montant non lisible (→ NaN)",  report.invalid_amount_count, False),
-        ("  → la ligne reste dans le DataFrame mais son montant", None,                      True),
-        ("     vaut 0 € dans le CA (exclue du calcul financier)", None,                      True),
-    ]
-
-    for i, (label, value, is_sub) in enumerate(lines_rows):
-        r      = 16 + i
-        row_bg = _GREY_LITE if i % 2 == 0 else _WHITE
-        _w(ws, r, 1, label, size=10,
-           color=_GREY_MID if is_sub else _GREY_DARK,
-           italic=is_sub, bg=row_bg)
-        ws.cell(r, 1).border = _THIN_BORDER
-        if value is not None:
-            _w(ws, r, 2, value, bold=True, size=10, color=_NAVY, align="right", bg=row_bg)
-        else:
-            ws.cell(r, 2).fill = _fill(row_bg)
-        ws.cell(r, 2).border = _THIN_BORDER
+        _w(ws, r, 1, check.label, size=10, color=_GREY_DARK, bg=row_bg)
+        _w(ws, r, 2, float(check.obtained), size=10, color=_NAVY,
+           align="right", bg=row_bg, num_fmt=num_fmt)
+        _w(ws, r, 3, float(check.expected), size=10, color=_GREY_DARK,
+           align="right", bg=row_bg, num_fmt=num_fmt)
+        _w(ws, r, 4, "OK" if check.ok else "ALERTE",
+           bold=True, size=10, color=_GREEN if check.ok else _RED,
+           align="center", bg=row_bg)
+        _w(ws, r, 5, check.detail or "—", size=9,
+           color=_GREY_MID, italic=True, bg=row_bg, wrap=True)
+        for col in range(1, 6):
+            ws.cell(r, col).border = _THIN_BORDER
         ws.row_dimensions[r].height = 16
 
-    # La section est plus longue (8 lignes au lieu de 5) → la note d'audit
-    # descend de 3 lignes : ligne 22 → ligne 25.
-    ws.row_dimensions[24].height = 8
-
-    # --- Note d'audit ---
-    ws.merge_cells("A25:B25")
-    _w(ws, 25, 1,
-       "ℹ️  Ce rapport est également disponible dans le fichier log.txt généré lors de "
-       "l'exécution. Les deux documents sont complémentaires pour l'audit.",
+    # --- Note d'audit (miroir du log) ---
+    note_row = header_row + 1 + n_total + 1
+    ws.merge_cells(
+        start_row=note_row, start_column=1, end_row=note_row, end_column=5
+    )
+    _w(ws, note_row, 1,
+       "ℹ️  Réconciliation contre l'oracle (_manifest_anomalies.json). Ce rapport est "
+       "également écrit dans le fichier log.txt du run : les deux sont complémentaires "
+       "pour l'audit. Rappel : le CA n'est jamais stocké, il est recalculé en SQL sur "
+       "les faits du modèle en étoile.",
        size=8, color=_GREY_MID, italic=True, align="left", wrap=True)
-    ws.row_dimensions[25].height = 28
+    ws.row_dimensions[note_row].height = 40
 
 
 # ===========================================================================
@@ -1000,69 +1011,852 @@ def _format_data_sheet(ws: Any) -> None:
 # ASSEMBLAGE DU CLASSEUR COMPLET
 # ===========================================================================
 
+def _synthese_narrative(s: pd.Series) -> str:
+    """Génère un narratif factuel de 3-4 phrases à partir de la ligne de synthèse.
+
+    Le texte est dérivé mécaniquement des signes et seuils (pas d'interprétation
+    arbitraire) : sens de la croissance, du mouvement de marge, et de l'écart budget.
+
+    Args:
+        s: Ligne unique de la vue ``summary`` (``analytics['summary'].iloc[0]``).
+
+    Returns:
+        Le narratif prêt à insérer dans la cellule de lecture.
+    """
+    parts: list[str] = []
+
+    def fr(x: float, decimals: int = 1) -> str:
+        """Formate un nombre à la française (virgule décimale), sans toucher au reste."""
+        return f"{x:.{decimals}f}".replace(".", ",")
+
+    # Chiffre d'affaires + croissance annuelle
+    if s["ca_yoy_pct"] is not None and not pd.isna(s["ca_yoy_pct"]):
+        sens = "en hausse" if s["ca_yoy_pct"] >= 0 else "en baisse"
+        parts.append(
+            f"Le chiffre d'affaires atteint {_fmt_eur(s['ca'])}, {sens} de "
+            f"{fr(abs(s['ca_yoy_pct']))} % sur un an."
+        )
+    else:
+        parts.append(f"Le chiffre d'affaires atteint {_fmt_eur(s['ca'])} sur la période.")
+
+    # Taux de marge + évolution
+    tm = s["taux_marge"]
+    if s["taux_marge_delta_pts"] is not None and not pd.isna(s["taux_marge_delta_pts"]):
+        d = s["taux_marge_delta_pts"]
+        mvt = (
+            f"en recul de {fr(abs(d))} pts" if d < 0
+            else f"en progression de {fr(abs(d))} pts" if d > 0
+            else "stable"
+        )
+        parts.append(f"Le taux de marge s'établit à {fr(tm)} %, {mvt} par rapport à N-1.")
+    else:
+        parts.append(f"Le taux de marge s'établit à {fr(tm)} %.")
+
+    # Écart au budget (CA et marge)
+    if s["ecart_ca_pct"] is not None and not pd.isna(s["ecart_ca_pct"]):
+        sens_ca = "sous le budget" if s["ecart_ca_pct"] < 0 else "au-dessus du budget"
+        parts.append(
+            f"L'activité est {sens_ca} de {fr(abs(s['ecart_ca_pct']))} % sur le CA "
+            f"et de {fr(abs(s['ecart_marge_pct']))} % sur la marge."
+        )
+
+    # Point d'attention : croissance + érosion de marge simultanées
+    if (
+        s["ca_yoy_pct"] is not None and not pd.isna(s["ca_yoy_pct"])
+        and s["ca_yoy_pct"] > 0
+        and s["taux_marge_delta_pts"] is not None
+        and not pd.isna(s["taux_marge_delta_pts"])
+        and s["taux_marge_delta_pts"] < 0
+    ):
+        parts.append(
+            "Point d'attention : la croissance du CA s'accompagne d'une érosion de la "
+            "marge — à investiguer (mix produit, politique de remises)."
+        )
+
+    return " ".join(parts)
+
+
+def _build_synthese_sheet(
+    wb: Any,
+    analytics: dict[str, pd.DataFrame],
+    report: ReconciliationReport,
+) -> None:
+    """Construit la feuille '🧭 Synthèse DAF' : le one-pager de direction financière.
+
+    Trois rangées de cartes (niveaux / tendances annuelles / budget) avec couleur
+    sémantique sur les variances (vert favorable, rouge défavorable), un tampon
+    d'intégrité, et un narratif factuel auto-généré. C'est la première feuille du
+    classeur — celle qu'un DAF lit en priorité.
+
+    Args:
+        wb: Classeur openpyxl.
+        analytics: Vues analytiques (sortie de ``utils.build_analytics_views``).
+        report: Rapport de réconciliation (pour le tampon d'intégrité).
+    """
+    ws = wb.create_sheet("🧭 Synthèse DAF")
+    for col_idx, width in _COL_WIDTHS_DB.items():
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+    s = analytics["summary"].iloc[0]
+    monthly = analytics["monthly"]
+    period_label = (
+        f"{monthly['mois'].min()} → {monthly['mois'].max()}"
+        if not monthly.empty
+        else "période indéterminée"
+    )
+
+    # Ligne 1 : Titre
+    ws.merge_cells("A1:F1")
+    _w(ws, 1, 1, f"SYNTHÈSE DIRECTION FINANCIÈRE  ·  {SETTINGS.app_name}",
+       bold=True, size=16, color=_WHITE, bg=_NAVY, align="center")
+    ws.row_dimensions[1].height = 32
+
+    # Ligne 2 : Sous-titre
+    ws.merge_cells("A2:F2")
+    _w(ws, 2, 1,
+       f"Période : {period_label}   |   "
+       f"Généré le {datetime.today().strftime('%d/%m/%Y')}   |   v{SETTINGS.app_version}",
+       size=9, color=_GREY_MID, bg=_GREY_LITE, align="center", italic=True)
+    ws.row_dimensions[2].height = 15
+    ws.row_dimensions[3].height = 8
+
+    # Ligne 4 : Tampon d'intégrité (le chiffre n'a de valeur que s'il est audité)
+    if report.integrity_ok:
+        stamp, s_col, s_bg = "✅  DONNÉES RÉCONCILIÉES — INTÉGRITÉ VALIDÉE", _GREEN, _GREY_LITE
+    else:
+        stamp, s_col, s_bg = "🚨  ALERTE INTÉGRITÉ — CHIFFRES À NE PAS DIFFUSER", _RED, _ALERT_BG
+    ws.merge_cells("A4:F4")
+    _w(ws, 4, 1, stamp, bold=True, size=11, color=s_col, bg=s_bg, align="center")
+    ws.cell(4, 1).border = _THIN_BORDER
+    ws.row_dimensions[4].height = 22
+    ws.row_dimensions[5].height = 8
+
+    tm_txt = f"{s['taux_marge']:.1f} %".replace(".", ",")
+
+    # Rangée A — niveaux
+    _section_header(ws, 6, "INDICATEURS CLÉS")
+    _kpi_card(ws, 7, 1, "CHIFFRE D'AFFAIRES", _fmt_eur(s["ca"]), "réel, exercice complet")
+    _kpi_card(ws, 7, 3, "MARGE BRUTE", _fmt_eur(s["marge"]), f"taux : {tm_txt}")
+    _kpi_card(ws, 7, 5, "TAUX DE MARGE", tm_txt, "marge brute / CA")
+    ws.row_dimensions[10].height = 8
+
+    # Rangée B — tendances annuelles (couleur sémantique)
+    _kpi_card(ws, 11, 1, "CROISSANCE CA (1 AN)", _fmt_signed_pct(s["ca_yoy_pct"]),
+              "réel vs N-1", value_color=_favorable_color(s["ca_yoy_pct"]))
+    _kpi_card(ws, 11, 3, "ÉVOLUTION DU TAUX DE MARGE", _fmt_signed_pts(s["taux_marge_delta_pts"]),
+              "points de marge vs N-1", value_color=_favorable_color(s["taux_marge_delta_pts"]))
+    _kpi_card(ws, 11, 5, "CLIENTS ACTIFS", f"{int(s['clients_actifs']):,}".replace(",", " "),
+              "clients avec ventes livrées")
+    ws.row_dimensions[14].height = 8
+
+    # Rangée C — budget (couleur sémantique)
+    _section_header(ws, 15, "RÉALISÉ VS BUDGET")
+    _kpi_card(ws, 16, 1, "ÉCART BUDGET — CA", _fmt_signed_pct(s["ecart_ca_pct"]),
+              _fmt_eur(s["ecart_ca"]), value_color=_favorable_color(s["ecart_ca_pct"]))
+    _kpi_card(ws, 16, 3, "ÉCART BUDGET — MARGE", _fmt_signed_pct(s["ecart_marge_pct"]),
+              _fmt_eur(s["ecart_marge"]), value_color=_favorable_color(s["ecart_marge_pct"]))
+    _kpi_card(ws, 16, 5, "CA BUDGÉTÉ", _fmt_eur(s["ca_budget"]), "objectif de la période")
+    ws.row_dimensions[19].height = 8
+
+    # Narratif factuel
+    _section_header(ws, 20, "LECTURE DE LA DIRECTION FINANCIÈRE")
+    ws.merge_cells("A21:F24")
+    _w(ws, 21, 1, _synthese_narrative(s), size=10, color=_GREY_DARK,
+       align="left", wrap=True, bg=_GREY_LITE)
+    ws.cell(21, 1).border = _THIN_BORDER
+    for r in range(21, 25):
+        ws.row_dimensions[r].height = 18
+
+
+def _chart_marge_erosion(monthly: pd.DataFrame) -> XLImage:
+    """Graphique signature — CA mensuel (barres) vs taux de marge mensuel (courbe).
+
+    À double axe : le CA en barres (axe gauche, €) et le taux de marge en courbe
+    (axe droit, %). C'est le graphique qui *raconte* l'histoire d'un DAF : le volume
+    se maintient ou progresse pendant que le taux de marge se dégrade. L'axe de droite
+    est auto-échelonné (convention des courbes de taux : on ne part pas de zéro, sinon
+    la tendance d'un taux serait illisible).
+
+    Args:
+        monthly: Vue mensuelle [mois, ca, marge, taux_marge] triée par mois.
+
+    Returns:
+        Image PNG openpyxl.
+    """
+    labels = monthly["mois"].astype(str).tolist()
+    ca = monthly["ca"].tolist()
+    tm = monthly["taux_marge"].tolist()
+    x = range(len(labels))
+
+    fig, ax = plt.subplots(figsize=(_CHART_W / 2.54, _CHART_H / 2.54))
+    fig.patch.set_facecolor(f"#{_WHITE}")
+
+    ax.bar(list(x), ca, color=f"#{_NAVY}", width=0.6, alpha=0.35, zorder=3)
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(_eur_axis_fmt))
+    _apply_chart_style(
+        ax, "Érosion de la marge : CA (barres) vs taux de marge (courbe)",
+        "Mois", "CA mensuel (€)",
+    )
+
+    # Axe secondaire : taux de marge en %, courbe rouge (signal de dégradation)
+    ax2 = ax.twinx()
+    ax2.plot(list(x), tm, color=f"#{_RED}", linewidth=2, marker="o", markersize=3, zorder=5)
+    ax2.set_ylabel("Taux de marge (%)", fontsize=8, color=f"#{_RED}")
+    ax2.yaxis.set_major_formatter(mticker.FuncFormatter(_pct_axis_fmt_unsigned))
+    ax2.tick_params(axis="y", labelsize=7.5, labelcolor=f"#{_RED}", length=3, width=0.5)
+    ax2.spines["top"].set_visible(False)
+    ax2.spines["right"].set_color(f"#{_RED}")
+    ax2.spines["right"].set_linewidth(0.5)
+
+    fig.tight_layout()
+    return _fig_to_xl_image(fig)
+
+
+def _chart_marge_par_categorie(by_category: pd.DataFrame, avg_margin: float) -> XLImage:
+    """Graphique — taux de marge par catégorie (barres horizontales, vs moyenne).
+
+    Les barres sont colorées en rouge si la catégorie est sous le taux de marge moyen
+    (elle dilue la marge globale), en vert sinon. Une ligne pointillée marque la
+    moyenne. La part de CA est annotée en bout de barre : on voit alors si une
+    catégorie peu margée pèse lourd dans le CA — c'est le cœur du diagnostic « mix ».
+
+    Args:
+        by_category: Vue [categorie, ca, marge, taux_marge, part_ca_pct].
+        avg_margin: Taux de marge moyen global (référence).
+
+    Returns:
+        Image PNG openpyxl.
+    """
+    d = by_category.sort_values("taux_marge")
+    cats = d["categorie"].tolist()
+    tm = d["taux_marge"].tolist()
+    parts = d["part_ca_pct"].tolist()
+    y = range(len(cats))
+    colors = [f"#{_RED}" if t < avg_margin else f"#{_GREEN}" for t in tm]
+
+    fig, ax = plt.subplots(figsize=(_CHART_W / 2.54, _CHART_H / 2.54))
+    fig.patch.set_facecolor(f"#{_WHITE}")
+
+    ax.barh(list(y), tm, color=colors, height=0.6, zorder=3)
+    ax.axvline(avg_margin, color=f"#{_GREY_MID}", linestyle="--", linewidth=1, zorder=4)
+    ax.text(avg_margin, len(cats) - 0.3, f" moy. {avg_margin:.0f} %",
+            fontsize=6.5, color=f"#{_GREY_MID}", va="top")
+    ax.set_yticks(list(y))
+    ax.set_yticklabels(cats)
+    ax.set_xlim(0, max(tm) * 1.28)
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(_pct_axis_fmt_unsigned))
+    for i, (t, p) in enumerate(zip(tm, parts)):
+        ax.text(t + max(tm) * 0.02, i, f"{p:.0f} % du CA".replace(".", ","),
+                va="center", fontsize=6.5, color=f"#{_GREY_DARK}")
+
+    _apply_chart_style(
+        ax, "Taux de marge par catégorie (vs moyenne)",
+        "Taux de marge (%)", "", grid_axis="x",
+    )
+    fig.tight_layout()
+    return _fig_to_xl_image(fig)
+
+
+def _build_marge_sheet(wb: Any, analytics: dict[str, pd.DataFrame]) -> None:
+    """Construit la feuille '💹 Marge & rentabilité' : érosion + analyse par catégorie.
+
+    Deux graphiques empilés (courbe d'érosion, marge par catégorie) suivis d'une table
+    détaillée par catégorie avec couleur conditionnelle sur le taux de marge (rouge si
+    sous la moyenne globale). La marge est recalculée en amont (jamais stockée).
+
+    Args:
+        wb: Classeur openpyxl.
+        analytics: Vues analytiques (sortie de ``utils.build_analytics_views``).
+    """
+    ws = wb.create_sheet("💹 Marge & rentabilité")
+    for col, width in {"A": 24, "B": 16, "C": 16, "D": 16, "E": 14}.items():
+        ws.column_dimensions[col].width = width
+
+    monthly = analytics["monthly"]
+    by_cat = analytics["by_category"]
+    avg_margin = float(analytics["summary"].iloc[0]["taux_marge"])
+
+    # Titre + sous-titre
+    ws.merge_cells("A1:F1")
+    _w(ws, 1, 1, "MARGE & RENTABILITÉ", bold=True, size=16,
+       color=_WHITE, bg=_NAVY, align="center")
+    ws.row_dimensions[1].height = 30
+    ws.merge_cells("A2:F2")
+    _w(ws, 2, 1,
+       f"Taux de marge global : {avg_margin:.1f} %".replace(".", ",")
+       + f"   |   Marge brute : {_fmt_eur(monthly['marge'].sum())}",
+       size=9, color=_GREY_MID, bg=_GREY_LITE, align="center", italic=True)
+    ws.row_dimensions[2].height = 15
+
+    # Graphique 1 : érosion
+    _section_header(ws, 4, "ÉROSION DE LA MARGE DANS LE TEMPS")
+    ws.add_image(_chart_marge_erosion(monthly), "A5")
+
+    # Graphique 2 : marge par catégorie
+    _section_header(ws, 27, "RENTABILITÉ PAR CATÉGORIE")
+    ws.add_image(_chart_marge_par_categorie(by_cat, avg_margin), "A28")
+
+    # Table détaillée par catégorie
+    _section_header(ws, 50, "DÉTAIL PAR CATÉGORIE")
+    headers = ["Catégorie", "CA", "Marge brute", "Taux de marge", "Part de CA"]
+    for c, label in enumerate(headers, start=1):
+        align = "left" if c == 1 else "center"
+        _w(ws, 51, c, label, bold=True, size=10, color=_WHITE, bg=_NAVY, align=align)
+        ws.cell(51, c).border = _THIN_BORDER
+    money_fmt = '#,##0 "€"'
+    pct_fmt = '0.0 "%"'
+    d = by_cat.sort_values("ca", ascending=False).reset_index(drop=True)
+    for i, row in d.iterrows():
+        r = 52 + i
+        bg = _GREY_LITE if i % 2 == 0 else _WHITE
+        # Couleur conditionnelle : taux sous la moyenne globale = dilutif (rouge)
+        tm_color = _RED if row["taux_marge"] < avg_margin else _GREEN
+        _w(ws, r, 1, row["categorie"], size=10, color=_GREY_DARK, bg=bg)
+        _w(ws, r, 2, float(row["ca"]), size=10, color=_NAVY, align="right",
+           bg=bg, num_fmt=money_fmt)
+        _w(ws, r, 3, float(row["marge"]), size=10, color=_GREY_DARK, align="right",
+           bg=bg, num_fmt=money_fmt)
+        _w(ws, r, 4, float(row["taux_marge"]), size=10, color=tm_color, bold=True,
+           align="right", bg=bg, num_fmt=pct_fmt)
+        _w(ws, r, 5, float(row["part_ca_pct"]), size=10, color=_GREY_DARK,
+           align="right", bg=bg, num_fmt=pct_fmt)
+        for c in range(1, 6):
+            ws.cell(r, c).border = _THIN_BORDER
+
+    # Graphique : évolution du mix produit — explique visuellement l'érosion
+    # (une catégorie peu margée qui gagne en part dilue la marge globale).
+    _section_header(ws, 59, "ÉVOLUTION DU MIX PRODUIT")
+    ws.add_image(_chart_mix_categoriel(analytics["category_mix"]), "A60")
+
+    # Graphique : impact des remises sur la marge (fuite de marge)
+    _section_header(ws, 83, "REMISES & FUITE DE MARGE")
+    ws.add_image(_chart_remises(analytics["by_discount_band"]), "A84")
+
+
+def _chart_remises(by_discount_band: pd.DataFrame) -> XLImage:
+    """Graphique — taux de marge par tranche de remise, avec part de CA annotée.
+
+    Met en évidence la « fuite de marge » : à mesure que la remise courante augmente,
+    le taux de marge se dégrade. La part de CA annotée montre où se concentre le
+    volume — donc où une meilleure discipline de remise rapporterait le plus.
+
+    Args:
+        by_discount_band: Vue [tranche, lignes, ca, taux_marge, part_ca_pct] ordonnée.
+
+    Returns:
+        Image PNG openpyxl.
+    """
+    bands = by_discount_band["tranche"].tolist()
+    tm = by_discount_band["taux_marge"].tolist()
+    parts = by_discount_band["part_ca_pct"].tolist()
+    x = range(len(bands))
+
+    fig, ax = plt.subplots(figsize=(_CHART_W / 2.54, _CHART_H / 2.54))
+    fig.patch.set_facecolor(f"#{_WHITE}")
+    ax.bar(list(x), tm, color=f"#{_NAVY}", width=0.55, zorder=3)
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(bands)
+    ax.set_ylim(0, max(tm) * 1.25)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(_pct_axis_fmt_unsigned))
+    for i, (t, p) in enumerate(zip(tm, parts)):
+        ax.text(i, t + max(tm) * 0.03, f"{p:.0f} % du CA".replace(".", ","),
+                ha="center", fontsize=7, color=f"#{_GREY_DARK}")
+    _apply_chart_style(ax, "Taux de marge par tranche de remise",
+                       "Tranche de remise", "Taux de marge (%)")
+    fig.tight_layout()
+    return _fig_to_xl_image(fig)
+
+
+def _chart_budget_mensuel(budget_monthly: pd.DataFrame) -> XLImage:
+    """Graphique — CA mensuel réel (barres) vs budget (ligne cible).
+
+    Les barres donnent le réalisé, la ligne pointillée la cible budgétaire : un mois
+    dont la barre passe sous la ligne est en retard sur le plan. Lecture immédiate de
+    la tenue du budget mois par mois.
+
+    Args:
+        budget_monthly: Vue [mois, ca_reel, ca_budget, ...] triée par mois.
+
+    Returns:
+        Image PNG openpyxl.
+    """
+    labels = budget_monthly["mois"].astype(str).tolist()
+    reel = budget_monthly["ca_reel"].tolist()
+    budget = budget_monthly["ca_budget"].tolist()
+    x = range(len(labels))
+
+    fig, ax = plt.subplots(figsize=(_CHART_W / 2.54, _CHART_H / 2.54))
+    fig.patch.set_facecolor(f"#{_WHITE}")
+
+    ax.bar(list(x), reel, color=f"#{_NAVY}", width=0.6, zorder=3, label="Réel")
+    ax.plot(list(x), budget, color=f"#{_RED}", linewidth=1.5, linestyle="--",
+            marker="o", markersize=2.5, zorder=5, label="Budget")
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(_eur_axis_fmt))
+    ax.legend(fontsize=7, loc="upper left", framealpha=0.9)
+
+    _apply_chart_style(ax, "CA mensuel : réel vs budget", "Mois", "Montant (€)")
+    fig.tight_layout()
+    return _fig_to_xl_image(fig)
+
+
+def _chart_budget_ecart_region(budget_by_region: pd.DataFrame) -> XLImage:
+    """Graphique — écart au budget (CA, %) par région (barres horizontales signées).
+
+    Barres vertes (au-dessus du plan) ou rouges (sous le plan), triées : la région la
+    plus en retard ressort immédiatement. Ici le signe est porteur de sens (c'est un
+    écart, pas un niveau), d'où l'axe en pourcentage signé.
+
+    Args:
+        budget_by_region: Vue [region, ecart_ca_pct, ...].
+
+    Returns:
+        Image PNG openpyxl.
+    """
+    d = budget_by_region.sort_values("ecart_ca_pct")
+    regions = d["region"].tolist()
+    ecarts = d["ecart_ca_pct"].tolist()
+    y = range(len(regions))
+    colors = [f"#{_GREEN}" if e >= 0 else f"#{_RED}" for e in ecarts]
+
+    fig, ax = plt.subplots(figsize=(_CHART_W / 2.54, _CHART_H / 2.54))
+    fig.patch.set_facecolor(f"#{_WHITE}")
+
+    ax.barh(list(y), ecarts, color=colors, height=0.6, zorder=3)
+    ax.axvline(0, color=f"#{_GREY_MID}", linewidth=0.8, zorder=4)
+    ax.set_yticks(list(y))
+    ax.set_yticklabels(regions)
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(_pct_axis_fmt))
+
+    _apply_chart_style(
+        ax, "Écart au budget (CA) par région", "Écart (%)", "", grid_axis="x",
+    )
+    fig.tight_layout()
+    return _fig_to_xl_image(fig)
+
+
+def _build_budget_sheet(wb: Any, analytics: dict[str, pd.DataFrame]) -> None:
+    """Construit la feuille '🎯 Réalisé vs Budget' : suivi mensuel + détail régional.
+
+    Deux graphiques (CA réel vs budget par mois, écart par région) suivis d'une table
+    régionale couvrant CA et marge, avec couleur conditionnelle sur les écarts (rouge
+    si sous le budget). Convention : écart = réel - budget.
+
+    Args:
+        wb: Classeur openpyxl.
+        analytics: Vues analytiques (sortie de ``utils.build_analytics_views``).
+    """
+    ws = wb.create_sheet("🎯 Réalisé vs Budget")
+    widths = {"A": 20, "B": 15, "C": 15, "D": 13, "E": 15, "F": 15, "G": 13}
+    for col, width in widths.items():
+        ws.column_dimensions[col].width = width
+
+    bm = analytics["budget_monthly"]
+    br = analytics["budget_by_region"]
+    s = analytics["summary"].iloc[0]
+
+    # Titre + sous-titre (écart global)
+    ws.merge_cells("A1:G1")
+    _w(ws, 1, 1, "RÉALISÉ VS BUDGET", bold=True, size=16,
+       color=_WHITE, bg=_NAVY, align="center")
+    ws.row_dimensions[1].height = 30
+    ws.merge_cells("A2:G2")
+    _w(ws, 2, 1,
+       f"Écart global : {_fmt_signed_pct(s['ecart_ca_pct'])} sur le CA   |   "
+       f"{_fmt_signed_pct(s['ecart_marge_pct'])} sur la marge",
+       size=9, color=_GREY_MID, bg=_GREY_LITE, align="center", italic=True)
+    ws.row_dimensions[2].height = 15
+
+    # Graphiques
+    _section_header(ws, 4, "CA MENSUEL : RÉEL VS BUDGET", max_col=7)
+    ws.add_image(_chart_budget_mensuel(bm), "A5")
+
+    _section_header(ws, 27, "ÉCART AU BUDGET PAR RÉGION", max_col=7)
+    ws.add_image(_chart_budget_ecart_region(br), "A28")
+
+    # Table détaillée par région (CA + marge)
+    _section_header(ws, 50, "DÉTAIL PAR RÉGION", max_col=7)
+    headers = [
+        "Région", "CA réel", "CA budget", "Écart CA",
+        "Marge réelle", "Marge budget", "Écart marge",
+    ]
+    for c, label in enumerate(headers, start=1):
+        align = "left" if c == 1 else "center"
+        _w(ws, 51, c, label, bold=True, size=9, color=_WHITE, bg=_NAVY,
+           align=align, wrap=True)
+        ws.cell(51, c).border = _THIN_BORDER
+    ws.row_dimensions[51].height = 26
+
+    money_fmt = '#,##0 "€"'
+    pct_signed = '+0.0" %";-0.0" %"'
+    d = br.sort_values("ca_reel", ascending=False).reset_index(drop=True)
+    for i, row in d.iterrows():
+        r = 52 + i
+        bg = _GREY_LITE if i % 2 == 0 else _WHITE
+        ca_col = _RED if row["ecart_ca_pct"] < 0 else _GREEN
+        mg_col = _RED if row["ecart_marge_pct"] < 0 else _GREEN
+        _w(ws, r, 1, row["region"], size=10, color=_GREY_DARK, bg=bg)
+        _w(ws, r, 2, float(row["ca_reel"]), size=10, color=_NAVY, align="right",
+           bg=bg, num_fmt=money_fmt)
+        _w(ws, r, 3, float(row["ca_budget"]), size=10, color=_GREY_DARK, align="right",
+           bg=bg, num_fmt=money_fmt)
+        _w(ws, r, 4, float(row["ecart_ca_pct"]), size=10, color=ca_col, bold=True,
+           align="right", bg=bg, num_fmt=pct_signed)
+        _w(ws, r, 5, float(row["marge_reel"]), size=10, color=_NAVY, align="right",
+           bg=bg, num_fmt=money_fmt)
+        _w(ws, r, 6, float(row["marge_budget"]), size=10, color=_GREY_DARK,
+           align="right", bg=bg, num_fmt=money_fmt)
+        _w(ws, r, 7, float(row["ecart_marge_pct"]), size=10, color=mg_col, bold=True,
+           align="right", bg=bg, num_fmt=pct_signed)
+        for c in range(1, 8):
+            ws.cell(r, c).border = _THIN_BORDER
+
+
+def _chart_mix_categoriel(category_mix: pd.DataFrame) -> XLImage:
+    """Graphique — évolution du mix produit (barres empilées de part de CA par an).
+
+    Chaque barre (une par année) somme à 100 % ; les segments sont les catégories.
+    On *voit* le glissement du mix (une catégorie peu margée qui gagne en part dilue
+    mécaniquement la marge globale). C'est l'explication visuelle de l'érosion.
+
+    Args:
+        category_mix: Vue [categorie, part_AAAA, ...] (une colonne de part par année).
+
+    Returns:
+        Image PNG openpyxl.
+    """
+    palette = ["1F3864", "2E75B6", "8FAADC", "375623", "7F9C5A", "C9A227", "9C5A2E"]
+    year_cols = [c for c in category_mix.columns if c.startswith("part_")]
+    years = [c.replace("part_", "") for c in year_cols]
+    cats = category_mix["categorie"].tolist()
+    x = range(len(years))
+
+    fig, ax = plt.subplots(figsize=(_CHART_W / 2.54, _CHART_H / 2.54))
+    fig.patch.set_facecolor(f"#{_WHITE}")
+
+    bottom = [0.0] * len(years)
+    for i, cat in enumerate(cats):
+        vals = [
+            float(category_mix.loc[category_mix["categorie"] == cat, yc].fillna(0).iloc[0])
+            for yc in year_cols
+        ]
+        ax.bar(list(x), vals, bottom=bottom, width=0.5, zorder=3,
+               color=f"#{palette[i % len(palette)]}", label=cat)
+        bottom = [b + v for b, v in zip(bottom, vals)]
+
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(years)
+    ax.set_ylim(0, 100)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(_pct_axis_fmt_unsigned))
+    _apply_chart_style(ax, "Évolution du mix produit (part de CA)", "Année", "Part de CA (%)")
+    ax.legend(fontsize=6.5, loc="upper left", bbox_to_anchor=(1.01, 1.0), framealpha=0.9)
+    fig.tight_layout()
+    return _fig_to_xl_image(fig)
+
+
+def _chart_segment_poids(by_segment: pd.DataFrame) -> XLImage:
+    """Graphique — poids de chaque segment dans le CA (barres horizontales).
+
+    Annoté du nombre de clients : on voit qu'un segment peut peser lourd en CA tout
+    en reposant sur peu de clients (concentration), ou l'inverse (diversification).
+
+    Args:
+        by_segment: Vue [segment, ca, part_ca_pct, nb_clients, ...].
+
+    Returns:
+        Image PNG openpyxl.
+    """
+    d = by_segment.sort_values("part_ca_pct")
+    segs = d["segment"].tolist()
+    parts = d["part_ca_pct"].tolist()
+    nbs = d["nb_clients"].tolist()
+    y = range(len(segs))
+
+    fig, ax = plt.subplots(figsize=(_CHART_W / 2.54, _CHART_H / 2.54))
+    fig.patch.set_facecolor(f"#{_WHITE}")
+    ax.barh(list(y), parts, color=f"#{_NAVY}", height=0.55, zorder=3)
+    ax.set_yticks(list(y))
+    ax.set_yticklabels(segs)
+    ax.set_xlim(0, max(parts) * 1.25)
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(_pct_axis_fmt_unsigned))
+    for i, (p, n) in enumerate(zip(parts, nbs)):
+        ax.text(p + max(parts) * 0.02, i, f"{n} clients", va="center",
+                fontsize=7, color=f"#{_GREY_DARK}")
+    _apply_chart_style(ax, "Part du CA par segment client", "Part de CA (%)", "",
+                       grid_axis="x")
+    fig.tight_layout()
+    return _fig_to_xl_image(fig)
+
+
+def _chart_client_pareto(client_pareto: pd.DataFrame) -> XLImage:
+    """Graphique — courbe de Pareto du CA client (concentration / diversification).
+
+    Trace le CA cumulé (%) en fonction du nombre de clients. Une courbe qui grimpe
+    vite = forte dépendance à quelques clients ; une courbe progressive = base
+    diversifiée. Repère à 80 % du CA avec le nombre de clients correspondant.
+
+    Args:
+        client_pareto: Vue [rang, ca, ca_cumule_pct] triée par CA décroissant.
+
+    Returns:
+        Image PNG openpyxl.
+    """
+    rangs = client_pareto["rang"].tolist()
+    cumul = client_pareto["ca_cumule_pct"].tolist()
+    n_total = len(rangs)
+    n80 = int((client_pareto["ca_cumule_pct"] <= 80).sum()) or 1
+
+    fig, ax = plt.subplots(figsize=(_CHART_W / 2.54, _CHART_H / 2.54))
+    fig.patch.set_facecolor(f"#{_WHITE}")
+    ax.plot(rangs, cumul, color=f"#{_NAVY}", linewidth=2, zorder=4)
+    ax.fill_between(rangs, cumul, color=f"#{_NAVY}", alpha=0.08, zorder=3)
+    ax.axhline(80, color=f"#{_GREY_MID}", linestyle="--", linewidth=0.8, zorder=2)
+    ax.axvline(n80, color=f"#{_GREY_MID}", linestyle="--", linewidth=0.8, zorder=2)
+    ax.text(n80, 40, f" {n80} clients ({100 * n80 / n_total:.0f} %)\n pour 80 % du CA",
+            fontsize=7, color=f"#{_GREY_DARK}", va="center")
+    ax.set_ylim(0, 100)
+    ax.set_xlim(0, n_total)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(_pct_axis_fmt_unsigned))
+    _apply_chart_style(ax, "Concentration du CA par client (Pareto)",
+                       "Nombre de clients (du plus gros au plus petit)", "CA cumulé (%)")
+    fig.tight_layout()
+    return _fig_to_xl_image(fig)
+
+
+def _build_salesperson_sheet(wb: Any, analytics: dict[str, pd.DataFrame]) -> None:
+    """Construit la feuille '👤 Par commercial' enrichie : CA, marge et taux par tête.
+
+    Remplace l'ancien export brut (CA seul) : un commercial qui « fait du volume »
+    à coups de remises a un CA élevé mais un taux de marge faible. La couleur
+    conditionnelle sur le taux (rouge si sous la moyenne) rend cela visible.
+
+    Args:
+        wb: Classeur openpyxl.
+        analytics: Vues analytiques (contient ``by_salesperson`` et ``summary``).
+    """
+    ws = wb.create_sheet("👤 Par commercial")
+    for col, width in {"A": 22, "B": 16, "C": 16, "D": 15, "E": 13}.items():
+        ws.column_dimensions[col].width = width
+
+    sp = analytics["by_salesperson"].copy()
+    avg_margin = float(analytics["summary"].iloc[0]["taux_marge"])
+
+    ws.merge_cells("A1:E1")
+    _w(ws, 1, 1, "PERFORMANCE PAR COMMERCIAL", bold=True, size=14,
+       color=_WHITE, bg=_NAVY, align="center")
+    ws.row_dimensions[1].height = 26
+    ws.merge_cells("A2:E2")
+    _w(ws, 2, 1, "CA, marge brute et taux de marge par commercial "
+       f"(taux moyen : {avg_margin:.1f} %".replace(".", ",") + ")",
+       size=9, color=_GREY_MID, bg=_GREY_LITE, align="center", italic=True)
+    ws.row_dimensions[2].height = 14
+
+    headers = ["Commercial", "CA", "Marge brute", "Taux de marge", "Part de CA"]
+    for c, label in enumerate(headers, start=1):
+        align = "left" if c == 1 else "center"
+        _w(ws, 4, c, label, bold=True, size=10, color=_WHITE, bg=_NAVY, align=align)
+        ws.cell(4, c).border = _THIN_BORDER
+
+    money_fmt = '#,##0 "€"'
+    pct_fmt = '0.0 "%"'
+    for i, row in sp.reset_index(drop=True).iterrows():
+        r = 5 + i
+        bg = _GREY_LITE if i % 2 == 0 else _WHITE
+        tm_color = _RED if row["taux_marge"] < avg_margin else _GREEN
+        _w(ws, r, 1, row["commercial"], size=10, color=_GREY_DARK, bg=bg)
+        _w(ws, r, 2, float(row["ca"]), size=10, color=_NAVY, align="right",
+           bg=bg, num_fmt=money_fmt)
+        _w(ws, r, 3, float(row["marge"]), size=10, color=_GREY_DARK, align="right",
+           bg=bg, num_fmt=money_fmt)
+        _w(ws, r, 4, float(row["taux_marge"]), size=10, color=tm_color, bold=True,
+           align="right", bg=bg, num_fmt=pct_fmt)
+        _w(ws, r, 5, float(row["part_ca_pct"]), size=10, color=_GREY_DARK,
+           align="right", bg=bg, num_fmt=pct_fmt)
+        for c in range(1, 6):
+            ws.cell(r, c).border = _THIN_BORDER
+
+
+def _build_clients_sheet(wb: Any, analytics: dict[str, pd.DataFrame]) -> None:
+    """Construit la feuille '👥 Clients & segments' : poids segments + concentration.
+
+    Cadrage : la concentration se lit d'abord au niveau segment (les Grands
+    Comptes pèsent lourd avec peu de clients), tandis que la base de clients prise
+    individuellement est, elle, diversifiée — un atout (faible dépendance). La courbe
+    de Pareto matérialise cette diversification.
+
+    Args:
+        wb: Classeur openpyxl.
+        analytics: Vues analytiques (``by_segment``, ``client_pareto``, ``client_top``).
+    """
+    ws = wb.create_sheet("👥 Clients & segments")
+    for col, width in {"A": 34, "B": 18, "C": 13, "D": 13, "E": 13}.items():
+        ws.column_dimensions[col].width = width
+
+    by_segment = analytics["by_segment"]
+    pareto = analytics["client_pareto"]
+    top = analytics["client_top"]
+
+    n_total = len(pareto)
+    n80 = int((pareto["ca_cumule_pct"] <= 80).sum()) or 1
+    top_seg = by_segment.iloc[0]
+
+    ws.merge_cells("A1:E1")
+    _w(ws, 1, 1, "CLIENTS & SEGMENTS", bold=True, size=14,
+       color=_WHITE, bg=_NAVY, align="center")
+    ws.row_dimensions[1].height = 26
+    ws.merge_cells("A2:E2")
+    _w(ws, 2, 1,
+       f"{top_seg['segment']} : {top_seg['part_ca_pct']:.0f} % du CA pour "
+       f"{int(top_seg['nb_clients'])} clients   |   base diversifiée : "
+       f"{n80} clients ({100 * n80 / n_total:.0f} %) pour 80 % du CA",
+       size=9, color=_GREY_MID, bg=_GREY_LITE, align="center", italic=True)
+    ws.row_dimensions[2].height = 14
+
+    # Graphiques
+    _section_header(ws, 4, "RÉPARTITION DU CA PAR SEGMENT", max_col=5)
+    ws.add_image(_chart_segment_poids(by_segment), "A5")
+    _section_header(ws, 27, "CONCENTRATION DU CA PAR CLIENT (PARETO)", max_col=5)
+    ws.add_image(_chart_client_pareto(pareto), "A28")
+
+    # Table segments
+    _section_header(ws, 50, "DÉTAIL PAR SEGMENT", max_col=5)
+    seg_headers = ["Segment", "CA", "Part de CA", "Nb clients", "Taux de marge"]
+    for c, label in enumerate(seg_headers, start=1):
+        align = "left" if c == 1 else "center"
+        _w(ws, 51, c, label, bold=True, size=10, color=_WHITE, bg=_NAVY, align=align)
+        ws.cell(51, c).border = _THIN_BORDER
+    money_fmt = '#,##0 "€"'
+    pct_fmt = '0.0 "%"'
+    for i, row in by_segment.reset_index(drop=True).iterrows():
+        r = 52 + i
+        bg = _GREY_LITE if i % 2 == 0 else _WHITE
+        _w(ws, r, 1, row["segment"], size=10, color=_GREY_DARK, bg=bg)
+        _w(ws, r, 2, float(row["ca"]), size=10, color=_NAVY, align="right",
+           bg=bg, num_fmt=money_fmt)
+        _w(ws, r, 3, float(row["part_ca_pct"]), size=10, color=_GREY_DARK,
+           align="right", bg=bg, num_fmt=pct_fmt)
+        _w(ws, r, 4, int(row["nb_clients"]), size=10, color=_GREY_DARK,
+           align="right", bg=bg, num_fmt="#,##0")
+        _w(ws, r, 5, float(row["taux_marge"]), size=10, color=_GREY_DARK,
+           align="right", bg=bg, num_fmt=pct_fmt)
+        for c in range(1, 6):
+            ws.cell(r, c).border = _THIN_BORDER
+
+    # Table top clients
+    base = 52 + len(by_segment) + 1
+    _section_header(ws, base, "TOP 10 CLIENTS", max_col=5)
+    top_headers = ["Client", "Segment", "CA", "Part de CA", "Taux de marge"]
+    for c, label in enumerate(top_headers, start=1):
+        align = "left" if c in (1, 2) else "center"
+        _w(ws, base + 1, c, label, bold=True, size=10, color=_WHITE, bg=_NAVY, align=align)
+        ws.cell(base + 1, c).border = _THIN_BORDER
+    for i, row in top.head(10).reset_index(drop=True).iterrows():
+        r = base + 2 + i
+        bg = _GREY_LITE if i % 2 == 0 else _WHITE
+        _w(ws, r, 1, row["raison_sociale"], size=10, color=_GREY_DARK, bg=bg)
+        _w(ws, r, 2, row["segment"], size=10, color=_GREY_MID, bg=bg)
+        _w(ws, r, 3, float(row["ca"]), size=10, color=_NAVY, align="right",
+           bg=bg, num_fmt=money_fmt)
+        _w(ws, r, 4, float(row["part_ca_pct"]), size=10, color=_GREY_DARK,
+           align="right", bg=bg, num_fmt=pct_fmt)
+        _w(ws, r, 5, float(row["taux_marge"]), size=10, color=_GREY_DARK,
+           align="right", bg=bg, num_fmt=pct_fmt)
+        for c in range(1, 6):
+            ws.cell(r, c).border = _THIN_BORDER
+
+
 def _assemble_workbook(
     df: pd.DataFrame,
     report_months: pd.DataFrame,
     report_salespeople: pd.DataFrame,
     reconciliation_report: ReconciliationReport,
+    analytics: dict[str, pd.DataFrame],
 ) -> Any:
     """Assemble le classeur Excel enrichi avec toutes les feuilles dans l'ordre.
 
     Ordre final des feuilles (visible pour l'utilisateur) :
-        1. 📊 Dashboard
-        2. 📅 Par mois
-        3. 👤 Par commercial
-        4. 🔍 Données brutes
-        5. 🔐 Réconciliation
-        (_data est cachée et reste en dernière position)
+        1. 🧭 Synthèse DAF
+        2. 💹 Marge & rentabilité
+        3. 🎯 Réalisé vs Budget
+        4. 👥 Clients & segments
+        5. 📊 Dashboard
+        6. 📅 Par mois
+        7. 👤 Par commercial
+        8. 🔍 Annexe (données brutes)
+        9. 🔐 Réconciliation
 
     Args:
         df: DataFrame nettoyé.
         report_months: Agrégation mensuelle [mois, montant].
         report_salespeople: Agrégation par commercial [commercial, montant].
-        reconciliation_report: Rapport de réconciliation issu de ``utils.reconcile_data()``.
+        reconciliation_report: Rapport issu de ``utils.reconcile_against_manifest()``.
+        analytics: Vues analytiques DAF (``utils.build_analytics_views``).
 
     Returns:
         Classeur openpyxl complet, ordonné et formaté, prêt à être sauvegardé.
     """
     # Copies pour l'export : renommage de la colonne interne "montant"
     # en "montant en euros" pour la lisibilité dans les feuilles de données.
-    months_xp     = report_months.copy().rename(columns={"montant": "montant en euros"})
-    salespeople_xp = report_salespeople.copy().rename(columns={"montant": "montant en euros"})
+    months_xp = report_months.copy().rename(columns={"montant": "montant en euros"})
 
-    # Création initiale via pandas ExcelWriter (gère la sérialisation des DataFrames)
+    # Création initiale via pandas ExcelWriter (gère la sérialisation des DataFrames).
+    # « Par commercial » n'est plus un export brut : il est enrichi (CA + marge + taux)
+    # par _build_salesperson_sheet à partir des vues analytiques.
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        months_xp.to_excel(     writer, sheet_name="📅 Par mois",        index=False)
-        salespeople_xp.to_excel(writer, sheet_name="👤 Par commercial",  index=False)
-        df.to_excel(            writer, sheet_name="🔍 Données brutes",   index=False)
+        months_xp.to_excel(writer, sheet_name="📅 Par mois",            index=False)
+        df.to_excel(       writer, sheet_name="🔍 Annexe (données brutes)", index=False)
     buf.seek(0)
     wb = load_workbook(buf)
 
     # Formatage des feuilles de données
-    for name in ["📅 Par mois", "👤 Par commercial", "🔍 Données brutes"]:
+    for name in ["📅 Par mois", "🔍 Annexe (données brutes)"]:
         if name in wb.sheetnames:
             _format_data_sheet(wb[name])
+    # L'annexe est un export d'audit volumineux : on la rend filtrable (autofilter)
+    # plutôt que de la donner brute — un DAF ne déroule pas 50 000+ lignes à la main.
+    annexe = wb["🔍 Annexe (données brutes)"]
+    annexe.auto_filter.ref = annexe.dimensions
 
     # Calcul des KPIs
     kpis = compute_dashboard_kpis(df, report_months, report_salespeople)
 
     # Ajout des nouvelles feuilles
+    _build_synthese_sheet(wb, analytics, reconciliation_report)
+    _build_marge_sheet(wb, analytics)
+    _build_budget_sheet(wb, analytics)
+    _build_clients_sheet(wb, analytics)
     _build_dashboard_sheet(wb, report_months, report_salespeople, df, kpis)
+    _build_salesperson_sheet(wb, analytics)
     _build_reconciliation_sheet(wb, reconciliation_report)
 
-    # Réordonnancement : Dashboard en premier, _data cachée en dernier.
-    # Manipulation de wb._sheets (liste interne openpyxl 3.x) :
-    # l'API publique move_sheet() ne permet pas de spécifier un ordre absolu.
+    # Réordonnancement : ordre absolu voulu. Manipulation de wb._sheets (liste interne
+    # openpyxl 3.x) : l'API publique move_sheet() ne permet pas d'ordre absolu.
     target_order = [
+        "🧭 Synthèse DAF",
+        "💹 Marge & rentabilité",
+        "🎯 Réalisé vs Budget",
+        "👥 Clients & segments",
         "📊 Dashboard",
         "📅 Par mois",
         "👤 Par commercial",
-        "🔍 Données brutes",
+        "🔍 Annexe (données brutes)",
         "🔐 Réconciliation",
     ]
     sheet_map  = {ws.title: ws for ws in wb.worksheets}
     wb._sheets = [sheet_map[name] for name in target_order if name in sheet_map]
+
+    # Mise en page impression : paysage + ajustement à la largeur d'une page.
+    # Les feuilles larges (réconciliation, budget, clients) ne se scindent plus
+    # latéralement à l'impression ; les lignes continuent sur plusieurs pages.
+    for ws in wb.worksheets:
+        ws.page_setup.orientation = "landscape"
+        ws.page_setup.fitToWidth = 1
+        ws.page_setup.fitToHeight = 0
+        ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
 
     return wb
 
@@ -1076,28 +1870,31 @@ def build_excel_bytes_with_dashboard(
     report_months: pd.DataFrame,
     report_salespeople: pd.DataFrame,
     reconciliation_report: ReconciliationReport,
+    analytics: dict[str, pd.DataFrame],
 ) -> bytes:
     """Génère le classeur Excel enrichi en mémoire (mode Streamlit).
 
-    Remplace le couple ``build_excel_bytes`` + ``format_excel_bytes`` de utils.py.
     Toutes les feuilles sont créées, formatées et ordonnées en un seul passage.
 
     Args:
         df: DataFrame nettoyé (colonnes : date, montant, mois, commercial optionnel).
         report_months: Agrégation mensuelle [mois, montant].
         report_salespeople: Agrégation par commercial [commercial, montant] ou vide.
-        reconciliation_report: Rapport issu de ``utils.reconcile_data()``.
+        reconciliation_report: Rapport issu de ``utils.reconcile_against_manifest()``.
+        analytics: Vues analytiques DAF (``utils.build_analytics_views``).
 
     Returns:
         Bytes du fichier ``.xlsx`` complet, prêt à être proposé en téléchargement.
     """
-    wb  = _assemble_workbook(df, report_months, report_salespeople, reconciliation_report)
+    wb  = _assemble_workbook(
+        df, report_months, report_salespeople, reconciliation_report, analytics
+    )
     out = io.BytesIO()
     wb.save(out)
     out.seek(0)
     logging.info(
         "Classeur Excel enrichi généré en mémoire "
-        "(dashboard + réconciliation + données formatées)."
+        "(synthèse + dashboard + réconciliation + données formatées)."
     )
     return out.getvalue()
 
@@ -1108,10 +1905,10 @@ def export_excel_with_dashboard(
     report_salespeople: pd.DataFrame,
     reconciliation_report: ReconciliationReport,
     filepath: Path,
+    analytics: dict[str, pd.DataFrame],
 ) -> Path:
     """Exporte le classeur Excel enrichi sur le disque (mode Batch).
 
-    Remplace le couple ``export_excel`` + ``format_excel_file`` de utils.py.
     Crée le répertoire parent si nécessaire.
 
     Args:
@@ -1120,6 +1917,7 @@ def export_excel_with_dashboard(
         report_salespeople: Agrégation par commercial.
         reconciliation_report: Rapport de réconciliation.
         filepath: Chemin de destination (fichier ``.xlsx``).
+        analytics: Vues analytiques DAF (``utils.build_analytics_views``).
 
     Returns:
         Path du fichier créé.
@@ -1130,11 +1928,11 @@ def export_excel_with_dashboard(
     Path(filepath).parent.mkdir(parents=True, exist_ok=True)
     try:
         wb = _assemble_workbook(
-            df, report_months, report_salespeople, reconciliation_report
+            df, report_months, report_salespeople, reconciliation_report, analytics
         )
         wb.save(str(filepath))
-        logging.info(f"Classeur Excel enrichi exporté : {filepath}")
+        logging.info("Classeur Excel enrichi exporté : %s", filepath)
         return Path(filepath)
     except Exception as exc:
-        logging.error(f"Erreur export classeur enrichi : {filepath} | {exc}")
+        logging.error("Erreur export classeur enrichi : %s | %s", filepath, exc)
         raise

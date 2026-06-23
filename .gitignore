@@ -1,5 +1,5 @@
 # --- Données & résultats (non versionnés) ---
-data/
+data_raw/
 output/
 
 # --- Environnement virtuel ---
