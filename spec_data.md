@@ -265,7 +265,7 @@ Projet 2). Encodage utf-8.
     "seed": 42,
     "generated_at": "2025-…T…Z",
     "periode": "2024-01..2025-12",
-    "version_generateur": "1.0.0"
+    "version_generateur": "1.1.0"
   },
   "verite_financiere": {
     "ca_total_livre_eur": 0.00,

@@ -1,4 +1,4 @@
-"""test_utils.py - Tests unitaires et de robustesse du moteur d'ingestion.
+"""Test_utils.py - Tests unitaires et de robustesse du moteur d'ingestion.
 
 Principes (cf. standards projet) :
 
@@ -11,7 +11,7 @@ Principes (cf. standards projet) :
 - **Validation du checkpoint** : un test prouve que ``reconcile_against_manifest``
   *détecte* une perte d'intégrité (CA faussé, clé étrangère orpheline).
 
-Exécution : ``pytest test_utils.py -v``
+Exécution : ``pytest Test_utils.py -v``
 """
 
 from __future__ import annotations
@@ -736,7 +736,7 @@ class TestAnalyticsViewsFilters:
     """
 
     def test_sans_filtre_retrocompatible(self, multi_axis_star) -> None:
-        """Sans argument = avec tous les filtres à None = CA total 40 (v3.2.0 intacte)."""
+        """Sans argument = avec tous les filtres à None = CA total 40 (comportement antérieur intact)."""
         sans = utils.build_analytics_views(multi_axis_star)
         none = utils.build_analytics_views(
             multi_axis_star, months=None, regions=None,

@@ -67,7 +67,7 @@ class AppSettings:
 
     # --- Application ---
     app_name: str = "Reporting CHR — Projet 1 (ingestion & consolidation)"
-    app_version: str = "3.2.0"
+    app_version: str = "3.3.0"
     log_level: str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO"))
 
     # --- Audit / réconciliation ---

@@ -712,7 +712,7 @@ def _build_dashboard_sheet(
     # -----------------------------------------------------------------------
     ws.merge_cells("A1:F1")
     _w(ws, 1, 1,
-       f"TABLEAU DE BORD  ·  {SETTINGS.app_name}",
+       "TABLEAU DE BORD",
        bold=True, size=18, color=_WHITE, bg=_NAVY, align="center")
     ws.row_dimensions[1].height = 34
 
@@ -1107,7 +1107,7 @@ def _build_synthese_sheet(
 
     # Ligne 1 : Titre
     ws.merge_cells("A1:F1")
-    _w(ws, 1, 1, f"SYNTHÈSE DIRECTION FINANCIÈRE  ·  {SETTINGS.app_name}",
+    _w(ws, 1, 1, "SYNTHÈSE DIRECTION FINANCIÈRE",
        bold=True, size=16, color=_WHITE, bg=_NAVY, align="center")
     ws.row_dimensions[1].height = 32
 

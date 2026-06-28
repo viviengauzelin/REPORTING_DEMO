@@ -1094,7 +1094,7 @@ def write_manifest(
             "seed": SEED,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "periode": f"{PERIOD_START}..{PERIOD_END}",
-            "version_generateur": "1.0.0",
+            "version_generateur": "1.1.0",
         },
         "verite_financiere": truth,
         "anomalies_injectees": {

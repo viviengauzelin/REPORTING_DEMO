@@ -1,6 +1,6 @@
 """utils.py - Moteur d'ingestion & de consolidation (Projet 1 : distributeur B2B CHR).
 
-Ce module porte la logique métier pure, indépendante de toute interface
+Ce module porte la **logique métier pure**, indépendante de toute interface
 (Streamlit ou Batch). Il est piloté par ``config.SOURCES`` : chaque source est lue,
 normalisée et validée à partir de son schéma déclaratif, ce qui garantit qu'une
 évolution du modèle (ajout d'une colonne requise, nouvel alias d'en-tête) se
@@ -8,24 +8,24 @@ propage sans toucher au code de nettoyage.
 
 Conception :
 
-- Auditable : empreinte SHA-256 de chaque fichier source (intégrité) et
-  réconciliation qui prouve chiffre à chiffre que le nettoyage retombe sur
+- **Auditable** : empreinte SHA-256 de chaque fichier source (intégrité) et
+  réconciliation qui prouve *chiffre à chiffre* que le nettoyage retombe sur
   l'oracle (``_manifest_anomalies.json``).
-- Robuste : gestion explicite des en-têtes sales, du format FR des montants,
+- **Robuste** : gestion explicite des en-têtes sales, du format FR des montants,
   des dates invalides, des doublons d'export et des encodages CSV.
-- Testable : aucune dépendance à Streamlit ; les loaders acceptent un
+- **Testable** : aucune dépendance à Streamlit ; les loaders acceptent un
   répertoire, les fonctions de bas niveau acceptent des ``pd.Series``.
-- Frontière pandas / DuckDB : pandas nettoie intra-source (format physique des
-  fichiers) ; DuckDB consolide inter-sources et recalcule le CA/la marge en SQL
-  (jamais stockés).
-
-Le module couvre l'ingestion complète : loaders des 5 sources (ventes, catalogue,
-CRM, commerciaux, budget), consolidation en STAR_SCHEMA, réconciliation contre
-l'oracle, puis dérivation des vues de reporting et des vues analytiques DAF.
+- **Frontière pandas / DuckDB** : pandas nettoie *intra-source* (format physique
+  des fichiers) ; DuckDB consolide *inter-sources* et recalcule le CA/la marge en
+  SQL (jamais stockés).
 
 Dépendances :
     pandas, openpyxl, duckdb  (voir requirements.txt)
     config  (ce projet)
+
+Périmètre courant : BLOC 1 (loader des ventes + réconciliation CA). Les loaders
+CRM / catalogue / commerciaux / budget et la construction complète du STAR_SCHEMA
+viennent dans les blocs suivants.
 """
 
 from __future__ import annotations
@@ -34,12 +34,11 @@ import hashlib
 import json
 import logging
 import re
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import reduce
 from pathlib import Path
-from typing import Iterator, Optional, Sequence, cast
+from typing import Optional, Sequence
 
 import duckdb
 import pandas as pd
@@ -269,7 +268,7 @@ def check_columns(df: pd.DataFrame, source_name: str) -> None:
     modifier cette fonction.
 
     Args:
-        df: DataFrame déjà passé par ``normalize_headers``.
+        df: DataFrame **déjà passé par** ``normalize_headers``.
         source_name: Clé de ``config.SOURCES``.
 
     Raises:
@@ -321,7 +320,7 @@ def parse_date(
     series: pd.Series,
     formats: tuple[str, ...] = ("%d/%m/%Y", "%Y-%m-%d"),
 ) -> pd.Series:
-    """Convertit des dates en datetime64 en essayant plusieurs formats stricts.
+    """Convertit des dates en datetime64 en essayant plusieurs formats **stricts**.
 
     Le jeu de données mêle deux formats : français ``JJ/MM/AAAA`` (ERP, CRM) et ISO
     ``AAAA-MM-JJ`` (référentiel sales-ops, bien tenu). On essaie les formats dans
@@ -373,7 +372,7 @@ def coerce_types(df: pd.DataFrame, source_name: str) -> pd.DataFrame:
     qu'une coercition générique ne saurait exprimer.
 
     Args:
-        df: DataFrame déjà passé par ``normalize_headers``.
+        df: DataFrame **déjà passé par** ``normalize_headers``.
         source_name: Clé de ``config.SOURCES``.
 
     Returns:
@@ -396,7 +395,7 @@ def coerce_types(df: pd.DataFrame, source_name: str) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# LOADER VENTES
+# LOADER VENTES (BLOC 1)
 # ---------------------------------------------------------------------------
 
 
@@ -439,11 +438,11 @@ def load_ventes(raw_dir: Path) -> tuple[pd.DataFrame, SalesCleaningReport]:
        (trace d'audit), lecture en ``dtype=str`` (aucun auto-parsing : on contrôle
        chaque conversion et on préserve les zéros initiaux des codes).
     2. ``normalize_headers`` (absorbe les en-têtes à espaces) puis ``check_columns``.
-    3. Dédup sur ``(commande_id, ligne_id)`` — *avant* tout filtrage.
+    3. **Dédup** sur ``(commande_id, ligne_id)`` — *avant* tout filtrage.
     4. Parsing : prix FR -> float (``NaN`` si KO, compté), date -> datetime
        (``NaT`` si KO, compté), quantité -> ``Int64``, remise -> /100.
     5. Drop des lignes à date ``NaT`` (transaction non datable, hors périmètre CA).
-       Les lignes à montant ``NaN`` sont conservées (drapeau) et naturellement
+       Les lignes à montant ``NaN`` sont **conservées** (drapeau) et naturellement
        exclues du ``SUM`` de réconciliation.
 
     Note de scalabilité (×100, ~6M lignes) : la lecture reste O(n) ; au-delà,
@@ -594,7 +593,7 @@ class ReconciliationReport:
 
     Attributes:
         checks: Liste des points de contrôle élémentaires.
-        integrity_ok: ``True`` si tous les contrôles passent.
+        integrity_ok: ``True`` si **tous** les contrôles passent.
     """
 
     checks: list[ReconciliationCheck] = field(default_factory=list)
@@ -624,7 +623,7 @@ class ReconciliationReport:
 
 
 # ---------------------------------------------------------------------------
-# LOADER CATALOGUE
+# LOADER CATALOGUE (BLOC 2)
 # ---------------------------------------------------------------------------
 
 
@@ -653,7 +652,7 @@ def load_catalogue(raw_dir: Path) -> tuple[pd.DataFrame, CatalogueCleaningReport
     L'anomalie traitée ici est la plus dangereuse du jeu de données : des variantes
     orthographiques de catégorie (``"consommables"``, ``"Conso."``,
     ``"hygiene et entretien"``) qui, non corrigées, éclatent une catégorie en
-    plusieurs et faussent silencieusement l'analyse de mix (le cœur du récit du
+    plusieurs et faussent **silencieusement** l'analyse de mix (le cœur du récit du
     Projet 2). La correction passe par ``config.canonical_category`` : la table de
     correspondance vit dans ``config``, donc une nouvelle variante se règle sans
     toucher au code.
@@ -712,7 +711,7 @@ def load_catalogue(raw_dir: Path) -> tuple[pd.DataFrame, CatalogueCleaningReport
 def _read_csv_robust(path: Path, source_name: str) -> pd.DataFrame:
     """Lit un CSV en respectant l'encodage et le séparateur déclarés dans le schéma.
 
-    L'encodage déclaré dans ``SourceSpec.encoding`` est essayé en premier (ex:
+    L'encodage déclaré dans ``SourceSpec.encoding`` est essayé **en premier** (ex:
     ``cp1252`` pour le CRM Windows), puis les encodages de repli de
     ``SETTINGS.csv_encodings_fallback``. Prioriser l'encodage déclaré évite le piège
     classique : ``latin-1`` décode n'importe quel octet sans lever d'erreur et
@@ -756,7 +755,7 @@ def _read_csv_robust(path: Path, source_name: str) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# LOADERS CRM & COMMERCIAUX
+# LOADERS CRM & COMMERCIAUX (BLOC 3)
 # ---------------------------------------------------------------------------
 
 
@@ -767,7 +766,7 @@ class CrmCleaningReport:
     Attributes:
         rows: Nombre de clients (préservé : aucune ligne supprimée).
         invalid_first_order_dates: Dates de première commande non parseables
-            (``NaT``) — tolérées, le client est conservé. Cross-check vs
+            (``NaT``) — **tolérées**, le client est conservé. Cross-check vs
             ``date_premiere_commande_invalide`` du manifeste.
         segments_normalized: Lignes dont le segment a été corrigé (casse/espaces).
         invalid_segments: Segments restant hors référentiel après normalisation
@@ -788,7 +787,7 @@ def load_crm(raw_dir: Path) -> tuple[pd.DataFrame, CrmCleaningReport]:
     Trois anomalies de saisie commerciale : encodage ``cp1252`` (accents),
     casse/espaces incohérents sur le segment, et dates de première commande
     invalides. Choix métier clé : une date de première commande invalide ne
-    disqualifie pas le client (``date_premiere_commande`` est ``nullable``) —
+    **disqualifie pas** le client (``date_premiere_commande`` est ``nullable``) —
     elle devient ``NaT``, contrairement à une ligne de vente non datée qui, elle,
     sort du périmètre comptable.
 
@@ -857,9 +856,9 @@ class CommerciauxCleaningReport:
 def load_commerciaux(raw_dir: Path) -> tuple[pd.DataFrame, CommerciauxCleaningReport]:
     """Lit le référentiel commerciaux (utf-8, propre) et type ses colonnes.
 
-    Cette source est volontairement sans anomalie : elle sert de contraste et
+    Cette source est volontairement **sans anomalie** : elle sert de contraste et
     de témoin (si le pipeline introduisait un défaut, il apparaîtrait ici sur des
-    données saines). À noter : ``date_embauche`` est au format ISO (``AAAA-MM-JJ``),
+    données saines). À noter : ``date_embauche`` est au format **ISO** (``AAAA-MM-JJ``),
     d'où l'intérêt du parsing multi-format de ``parse_date``.
 
     Args:
@@ -898,7 +897,7 @@ def load_commerciaux(raw_dir: Path) -> tuple[pd.DataFrame, CommerciauxCleaningRe
 
 
 # ---------------------------------------------------------------------------
-# REMODELAGE BUDGET - format large -> format long
+# REMODELAGE BUDGET (BLOC 4) - format large -> format long
 # ---------------------------------------------------------------------------
 
 
@@ -940,7 +939,7 @@ def _reshape_budget_sheet(
            agrégats, pas des données — les garder doublerait le budget.
         4. ``melt`` des 12 colonnes de mois en lignes (large -> long).
         5. Construction de ``periode`` ``AAAA-MM`` : le numéro de mois est la
-           position du libellé dans ``month_labels`` (pas de dictionnaire de mois
+           **position** du libellé dans ``month_labels`` (pas de dictionnaire de mois
            français à maintenir).
 
     Args:
@@ -1017,7 +1016,7 @@ def reshape_budget(raw_dir: Path) -> tuple[pd.DataFrame, BudgetCleaningReport]:
     large : titre, en-têtes en ligne 3, régions en cellules fusionnées, 12 mois en
     colonnes, sous-totaux intercalés. On remodèle chaque feuille puis on fusionne
     les métriques sur la clé ``(periode, nom_region, categorie)`` : chaque ligne
-    finale porte donc CA et Marge budgétés, prêts à être comparés au réalisé
+    finale porte donc CA **et** Marge budgétés, prêts à être comparés au réalisé
     (Projet 2).
 
     Args:
@@ -1083,34 +1082,7 @@ def reshape_budget(raw_dir: Path) -> tuple[pd.DataFrame, BudgetCleaningReport]:
 
 
 # ---------------------------------------------------------------------------
-# CONNEXION DUCKDB - helper de registration du star schema
-# ---------------------------------------------------------------------------
-
-
-@contextmanager
-def _star_connection(star: dict[str, pd.DataFrame]) -> Iterator["duckdb.DuckDBPyConnection"]:
-    """Ouvre une connexion DuckDB où toutes les tables du star schema sont enregistrées.
-
-    Factorise le motif répété (connexion, enregistrement de chaque table, fermeture
-    garantie) utilisé par les fonctions qui interrogent le modèle en étoile.
-
-    Args:
-        star: Tables du star schema, par nom.
-
-    Yields:
-        Une connexion DuckDB in-memory, fermée automatiquement en sortie de bloc.
-    """
-    con = duckdb.connect()
-    try:
-        for name, table in star.items():
-            con.register(name, table)
-        yield con
-    finally:
-        con.close()
-
-
-# ---------------------------------------------------------------------------
-# CONSOLIDATION STAR SCHEMA - jointures DuckDB
+# CONSOLIDATION STAR SCHEMA (BLOC 5) - jointures DuckDB
 # ---------------------------------------------------------------------------
 
 
@@ -1125,7 +1097,7 @@ def build_star_schema(cleaned: dict[str, pd.DataFrame]) -> dict[str, pd.DataFram
     - La source « ventes » est dénormalisée au grain ligne : on la scinde en
       ``fait_commande`` (grain commande, porte ``statut`` — constant par commande) et
       ``fait_ligne_commande`` (grain ligne, porte les composantes du CA). La marge et
-      le CA ne sont pas stockés : ils se recalculent en SQL.
+      le CA ne sont **pas** stockés : ils se recalculent en SQL.
     - ``fait_budget`` rattache le budget (qui porte ``nom_region``) à un
       ``code_region`` via ``dim_region``.
 
@@ -1201,7 +1173,7 @@ def build_star_schema(cleaned: dict[str, pd.DataFrame]) -> dict[str, pd.DataFram
 
 
 # ---------------------------------------------------------------------------
-# RÉCONCILIATION UNIFIÉE CONTRE L'ORACLE
+# RÉCONCILIATION UNIFIÉE CONTRE L'ORACLE (BLOC 5)
 # ---------------------------------------------------------------------------
 
 
@@ -1231,8 +1203,7 @@ def _count_orphans(
               SELECT 1 FROM {parent} AS p WHERE p.{parent_key} = c.{child_key}
           )
     """
-    row = con.execute(query).fetchone()
-    return int(row[0]) if row is not None else 0
+    return int(con.execute(query).fetchone()[0])
 
 
 def reconcile_against_manifest(
@@ -1244,11 +1215,11 @@ def reconcile_against_manifest(
 
     Remplace les réconciliations par bloc. Le rapport agrège :
 
-    - Les 5 métriques officielles de ``attendus_apres_nettoyage`` : lignes après
+    - **Les 5 métriques officielles** de ``attendus_apres_nettoyage`` : lignes après
       dédup, dates invalides, montants invalides (depuis le rapport ventes), CA
       réconcilié (recalculé en SQL sur les faits), catégories canoniques.
-    - Des contrôles structurels complémentaires : segments CRM tous canoniques,
-      grille budget complète, et intégrité référentielle (aucune clé étrangère
+    - **Des contrôles structurels** complémentaires : segments CRM tous canoniques,
+      grille budget complète, et **intégrité référentielle** (aucune clé étrangère
       orpheline entre faits et dimensions) — la preuve que 100 % des transactions se
       rattachent au modèle.
 
@@ -1262,10 +1233,10 @@ def reconcile_against_manifest(
         Le ``ReconciliationReport`` complet (oracle + contrôles structurels).
     """
     expected = manifest["attendus_apres_nettoyage"]
-    sales = cast(SalesCleaningReport, reports["ventes"])
-    catalogue = cast(CatalogueCleaningReport, reports["catalogue"])
-    crm = cast(CrmCleaningReport, reports["crm"])
-    budget = cast(BudgetCleaningReport, reports["budget"])
+    sales = reports["ventes"]
+    catalogue = reports["catalogue"]
+    crm = reports["crm"]
+    budget = reports["budget"]
     checks: list[ReconciliationCheck] = []
 
     # --- 5 métriques officielles de l'oracle ---
@@ -1313,7 +1284,10 @@ def reconcile_against_manifest(
     )
 
     # --- Intégrité référentielle (faits -> dimensions) en SQL ---
-    with _star_connection(star) as con:
+    con = duckdb.connect()
+    try:
+        for name, df in star.items():
+            con.register(name, df)
         fk_specs = [
             ("Lignes -> Produits", "fait_ligne_commande", "code_produit",
              "dim_produit", "code_produit"),
@@ -1334,6 +1308,8 @@ def reconcile_against_manifest(
                     detail="clés étrangères orphelines",
                 )
             )
+    finally:
+        con.close()
 
     recon = ReconciliationReport(checks=checks)
     logging.info("[Réconciliation unifiée]\n%s", recon.render())
@@ -1382,7 +1358,7 @@ def run_ingestion(
 
 
 # ---------------------------------------------------------------------------
-# PONT STAR SCHEMA -> VUES DE REPORTING
+# PONT STAR SCHEMA -> VUES DE REPORTING (BLOC 6)
 #
 # Le dashboard Excel/Streamlit (workbook.py) consomme trois structures héritées
 # du modèle de présentation : un DataFrame transactionnel et deux agrégats.
@@ -1426,22 +1402,29 @@ def build_reporting_views(
 
     Produit le triplet attendu par ``workbook.py`` :
 
-    1. ``df`` — transactions au grain ligne, commandes livrées uniquement.
+    1. ``df`` — transactions au **grain ligne**, commandes **livrées** uniquement.
        Colonnes : ``date`` (date de commande), ``mois`` (``YYYY-MM``),
        ``commercial`` (nom), ``montant`` (CA de la ligne, recalculé).
     2. ``report_months`` — agrégat ``[mois, montant]``.
     3. ``report_salespeople`` — agrégat ``[commercial, montant]``.
 
-    Choix de modélisation : on ne garde que le statut livré
-    (``config.STATUS_INCLUDED_IN_CA``) pour que le total du dashboard soit égal au
-    CA réconcilié — un seul chiffre entre la feuille Dashboard et la feuille
-    Réconciliation. Le ``LEFT JOIN`` sur ``dim_commercial`` est défensif : l'intégrité
-    référentielle garantit déjà 0 orphelin, mais une dégradation future rendrait la
-    perte visible (``commercial = None``) plutôt que de la faire disparaître. Le
-    ``montant`` reste à ``NaN`` quand le prix est invalide : ``groupby.sum()`` l'ignore
-    (la somme recolle au CA livré) tout en conservant la ligne dans ``df``, sans
-    maquiller une ligne KO en 0 €. Enfin, une date invalide (``NaT``) donne un ``mois``
-    nul, exclu des agrégats mensuels mais conservé dans ``df``.
+    **Choix de modélisation (justifiés)** :
+
+    - **Filtre ``statut`` livré** (``config.STATUS_INCLUDED_IN_CA``) : le total du
+      dashboard devient *strictement égal* au CA réconcilié (cohérence d'un chiffre
+      unique entre la feuille Dashboard et la feuille Réconciliation).
+    - **``LEFT JOIN`` sur ``dim_commercial``** : l'intégrité référentielle garantit
+      déjà 0 orphelin (donc ``LEFT`` ≡ ``INNER`` ici), mais on choisit ``LEFT`` par
+      principe défensif : une dégradation future du référentiel rendrait la perte
+      *visible* (``commercial = None``) au lieu de faire disparaître silencieusement
+      du CA.
+    - **``montant`` laissé à ``NaN`` quand le prix est invalide** : ``groupby.sum()``
+      ignore les ``NaN`` (la somme recolle au CA livré), tout en conservant la ligne
+      dans ``df``. Le compteur de transactions valides (KPI) reste ainsi cohérent
+      avec la métrique « montants invalides » de l'oracle — on ne maquille pas une
+      ligne KO en 0 €.
+    - **``mois`` issu de ``date_commande``** : une date invalide (``NaT``) donne un
+      ``mois`` nul, exclu des agrégats mensuels mais conservé dans ``df``.
 
     Args:
         star: Tables du star schema (sortie de ``build_star_schema`` /
@@ -1451,7 +1434,10 @@ def build_reporting_views(
         Le triplet ``(df, report_months, report_salespeople)``.
     """
     placeholders = ", ".join("?" for _ in STATUS_INCLUDED_IN_CA)
-    with _star_connection(star) as con:
+    con = duckdb.connect()
+    try:
+        for name, table in star.items():
+            con.register(name, table)
         # CA de la ligne = quantité × prix × (1 - remise). NULL si prix manquant
         # (NULL se propage dans l'expression -> NaN côté pandas), jamais stocké.
         df = con.execute(
@@ -1469,6 +1455,8 @@ def build_reporting_views(
             """,
             list(STATUS_INCLUDED_IN_CA),
         ).df()
+    finally:
+        con.close()
 
     # Agrégats en pandas : groupby.sum() ignore les NaN (montants invalides) et
     # dropna sur la clé écarte les lignes sans mois/commercial exploitable.
@@ -1498,7 +1486,7 @@ def build_reporting_views(
 
 
 # ---------------------------------------------------------------------------
-# COUCHE ANALYTIQUE DAF
+# COUCHE ANALYTIQUE DAF (BLOC 7)
 #
 # Distincte du « reporting opérationnel » (build_reporting_views, centré CA) :
 # cette couche produit les agrégats d'aide à la décision pour une direction
@@ -1520,7 +1508,7 @@ def build_analytics_views(
 ) -> dict[str, pd.DataFrame]:
     """Dérive les vues analytiques DAF du star schema, en SQL (marge recalculée).
 
-    Toutes les vues sont restreintes aux commandes livrées (cohérence avec le CA
+    Toutes les vues sont restreintes aux commandes **livrées** (cohérence avec le CA
     réconcilié). La marge brute d'une ligne vaut ``CA - coût`` avec
     ``CA = quantité × prix × (1 - remise)`` et ``coût = quantité × coût_unitaire``.
     L'écart au budget suit la convention financière ``réel - budget`` : un écart
@@ -1544,7 +1532,7 @@ def build_analytics_views(
     - ``by_discount_band`` : nb de lignes, CA, taux et part par tranche de remise.
 
     Filtres de présentation (optionnels, ``None`` = aucun filtre, comportement
-    rétrocompatible avec la v3.2.0). Ils sont injectés en SQL dans la vue ``_base``,
+    rétrocompatible avec le comportement antérieur). Ils sont injectés en SQL dans la vue ``_base``,
     si bien que les 12 vues restent cohérentes entre elles. Le budget n'étant
     dimensionné que par mois et région, seuls ``months`` et ``regions`` filtrent les
     CTE budgétaires ; un filtre ``segments`` ou ``salespeople`` ne réduit que le réel,
@@ -1561,7 +1549,11 @@ def build_analytics_views(
     Returns:
         Un dictionnaire ``{nom_vue: DataFrame}``.
     """
-    with _star_connection(star) as con:
+    con = duckdb.connect()
+    try:
+        for name, table in star.items():
+            con.register(name, table)
+
         # Statuts inclus dans le CA : constantes internes, injectées en littéraux SQL
         # échappés (un paramètre lié n'est pas autorisé dans un CREATE VIEW DuckDB).
         status_literals = ", ".join(
@@ -1819,6 +1811,8 @@ def build_analytics_views(
             ) ORDER BY ord
             """
         ).df()
+    finally:
+        con.close()
 
     # --- summary (1 ligne) : agrège les totaux et dérive le YoY depuis by_year ---
     ca_total = float(monthly["ca"].sum())
